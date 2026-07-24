@@ -1,0 +1,32 @@
+version: 2
+
+builds:
+  - id: ctx
+    main: ./cmd/ctx
+    binary: ctx
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/delightroom/ctx/internal/cli.Version={{.Version}}
+
+archives:
+  - id: ctx
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  extra_files:
+    - glob: ./install.sh
+
+changelog:
+  sort: asc
