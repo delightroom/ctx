@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/delightroom/ctx/internal/protocol"
 )
 
@@ -104,8 +105,7 @@ func isTerminal(stream any) bool {
 	if !ok {
 		return false
 	}
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(file.Fd())
 }
 
 func installedAgents() []string {
@@ -117,15 +117,4 @@ func installedAgents() []string {
 		agents = append(agents, "Codex")
 	}
 	return agents
-}
-
-func printFeeds(writer io.Writer, feeds []protocol.FeedSummary) {
-	for index, feed := range feeds {
-		fmt.Fprintf(writer, "  %d. %-32s %-8s %s\n",
-			index+1,
-			feed.Node+"/"+feed.Name,
-			displayAgent(feed.SourceAgent),
-			relativeTime(feed.UpdatedAt),
-		)
-	}
 }

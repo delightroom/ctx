@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/delightroom/ctx/internal/protocol"
+	"github.com/delightroom/ctx/internal/tailnet"
 	ctxtui "github.com/delightroom/ctx/internal/tui"
 )
 
@@ -40,29 +43,19 @@ func TestRunWithoutTerminalPrintsHelp(t *testing.T) {
 	}
 }
 
-func TestBareInteractiveRunLaunchesTUI(t *testing.T) {
-	terminal, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+func TestDevNullDoesNotLaunchTUI(t *testing.T) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer terminal.Close()
+	defer devNull.Close()
 	t.Setenv("CI", "")
 
-	original := launchInteractiveTUI
-	called := false
-	launchInteractiveTUI = func(io.Reader, io.Writer, io.Writer) error {
-		called = true
-		return nil
+	if isTerminal(devNull) {
+		t.Fatal("/dev/null was incorrectly detected as a terminal")
 	}
-	t.Cleanup(func() {
-		launchInteractiveTUI = original
-	})
-
-	if code := Run(nil, terminal, terminal, terminal); code != 0 {
+	if code := Run(nil, devNull, devNull, devNull); code != 0 {
 		t.Fatalf("Run exit code = %d", code)
-	}
-	if !called {
-		t.Fatal("bare interactive ctx did not launch the TUI")
 	}
 }
 
@@ -88,44 +81,34 @@ func TestExplicitTUIRequiresTerminalAndProvidesHelp(t *testing.T) {
 }
 
 func TestTUIActionHandoff(t *testing.T) {
-	originalProgram := runTUIProgram
-	originalHost := runTUIHost
-	originalTail := runTUITail
-	originalContinue := runTUIContinue
-	t.Cleanup(func() {
-		runTUIProgram = originalProgram
-		runTUIHost = originalHost
-		runTUITail = originalTail
-		runTUIContinue = originalContinue
-	})
-
 	var selected ctxtui.Result
-	runTUIProgram = func(config ctxtui.Config, _ io.Reader, _ io.Writer) (ctxtui.Result, error) {
-		if config.Loader == nil || config.Version != Version {
-			t.Fatalf("TUI config = %+v", config)
-		}
-		if _, ok := config.Context.Deadline(); ok {
-			t.Fatal("TUI context unexpectedly has a deadline")
-		}
-		return selected, nil
-	}
-
 	var command string
 	var commandArgs []string
-	runTUIHost = func(args []string, _, _ io.Writer) error {
-		command = "host"
-		commandArgs = append([]string(nil), args...)
-		return nil
-	}
-	runTUITail = func(args []string, _ io.Reader, _, _ io.Writer) error {
-		command = "tail"
-		commandArgs = append([]string(nil), args...)
-		return nil
-	}
-	runTUIContinue = func(args []string, _ io.Reader, _, _ io.Writer) error {
-		command = "continue"
-		commandArgs = append([]string(nil), args...)
-		return nil
+	dependencies := tuiDependencies{
+		runProgram: func(config ctxtui.Config, _ io.Reader, _ io.Writer) (ctxtui.Result, error) {
+			if config.Loader == nil || config.Version != Version {
+				t.Fatalf("TUI config = %+v", config)
+			}
+			if _, ok := config.Context.Deadline(); ok {
+				t.Fatal("TUI context unexpectedly has a deadline")
+			}
+			return selected, nil
+		},
+		host: func(args []string, _, _ io.Writer) error {
+			command = "host"
+			commandArgs = append([]string(nil), args...)
+			return nil
+		},
+		tail: func(args []string, _ io.Reader, _, _ io.Writer) error {
+			command = "tail"
+			commandArgs = append([]string(nil), args...)
+			return nil
+		},
+		continueWork: func(args []string, _ io.Reader, _, _ io.Writer) error {
+			command = "continue"
+			commandArgs = append([]string(nil), args...)
+			return nil
+		},
 	}
 
 	tests := []struct {
@@ -171,7 +154,7 @@ func TestTUIActionHandoff(t *testing.T) {
 			selected = test.result
 			command = ""
 			commandArgs = nil
-			if err := runTUI(strings.NewReader(""), io.Discard, io.Discard); err != nil {
+			if err := runTUIWith(dependencies, strings.NewReader(""), io.Discard, io.Discard); err != nil {
 				t.Fatal(err)
 			}
 			if test.wantCalled && command != test.want {
@@ -190,9 +173,139 @@ func TestTUIActionHandoff(t *testing.T) {
 func TestTUILoaderHonorsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := (cliTUILoader{}).LoadLocal(ctx, false)
+	_, err := (&cliTUILoader{}).LoadLocal(ctx, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("LoadLocal error = %v", err)
+	}
+}
+
+func TestTUILoaderCoalescesConcurrentStatusReads(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	loader := &cliTUILoader{
+		statusRead: func(context.Context) (tailnet.Status, error) {
+			calls.Add(1)
+			started <- struct{}{}
+			<-release
+			return tailnet.Status{}, nil
+		},
+	}
+
+	done := make(chan error, 2)
+	go func() {
+		_, err := loader.readTailnetStatus(context.Background())
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first status read did not start")
+	}
+	go func() {
+		_, err := loader.readTailnetStatus(context.Background())
+		done <- err
+	}()
+	select {
+	case <-started:
+		t.Fatal("concurrent status read was not coalesced")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for range 2 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("coalesced status read did not finish")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("tailscale status calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestFeedDiscoveryBoundsConcurrency(t *testing.T) {
+	bases := make([]string, maxConcurrentHostProbes*3)
+	for index := range bases {
+		bases[index] = "https://peer-" + strconv.Itoa(index)
+	}
+
+	var active atomic.Int32
+	var peak atomic.Int32
+	started := make(chan struct{}, len(bases))
+	release := make(chan struct{})
+	done := make(chan []protocol.FeedSummary, 1)
+
+	go func() {
+		done <- probeFeedBases(
+			context.Background(),
+			bases,
+			time.Second,
+			func(ctx context.Context, base string) ([]protocol.FeedSummary, error) {
+				current := active.Add(1)
+				defer active.Add(-1)
+				for {
+					previous := peak.Load()
+					if current <= previous || peak.CompareAndSwap(previous, current) {
+						break
+					}
+				}
+				started <- struct{}{}
+				select {
+				case <-release:
+					return []protocol.FeedSummary{{Name: base}}, nil
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			},
+		)
+	}()
+
+	for range maxConcurrentHostProbes {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("bounded workers did not start")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatalf("more than %d peer probes started concurrently", maxConcurrentHostProbes)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+
+	select {
+	case feeds := <-done:
+		if len(feeds) != len(bases) {
+			t.Fatalf("discovered feeds = %d, want %d", len(feeds), len(bases))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bounded peer discovery did not finish")
+	}
+	if peak.Load() != maxConcurrentHostProbes {
+		t.Fatalf("peak concurrency = %d, want %d", peak.Load(), maxConcurrentHostProbes)
+	}
+}
+
+func TestFeedDiscoveryStopsBeforeProbingCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls atomic.Int32
+	feeds := probeFeedBases(
+		ctx,
+		[]string{"https://peer-1", "https://peer-2"},
+		time.Second,
+		func(context.Context, string) ([]protocol.FeedSummary, error) {
+			calls.Add(1)
+			return nil, nil
+		},
+	)
+	if len(feeds) != 0 || calls.Load() != 0 {
+		t.Fatalf("cancelled discovery returned %d feeds after %d probes", len(feeds), calls.Load())
 	}
 }
 

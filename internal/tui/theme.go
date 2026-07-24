@@ -19,7 +19,6 @@ type palette struct {
 }
 
 type styles struct {
-	palette       palette
 	header        lipgloss.Style
 	panel         lipgloss.Style
 	panelActive   lipgloss.Style
@@ -69,7 +68,6 @@ func newStyles(dark bool) styles {
 		Padding(0, 1)
 
 	return styles{
-		palette: colors,
 		header: lipgloss.NewStyle().
 			Foreground(colors.text).
 			Background(colors.surface).

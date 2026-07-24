@@ -22,6 +22,11 @@ func TestRenderWideAndStackedLayouts(t *testing.T) {
 	if !sameLine(wide, "LOCAL SESSIONS", "SHARED CONTEXTS") {
 		t.Fatalf("wide layout did not render panels side by side:\n%s", stripANSI(wide))
 	}
+	plainWide := stripANSI(wide)
+	if !strings.Contains(plainWide, "> LOCAL SESSIONS") ||
+		!strings.Contains(plainWide, "> Claude") {
+		t.Fatalf("wide layout lacks non-color focus markers:\n%s", plainWide)
+	}
 
 	model.width = 80
 	model.height = 24
@@ -129,6 +134,9 @@ func TestActionModalAndHelp(t *testing.T) {
 		t.Fatalf("action modal state = %+v", model)
 	}
 	model.handleActionKey("down")
+	if !strings.Contains(stripANSI(model.renderActionModal()), "> Follow updates") {
+		t.Fatal("action modal lacks a non-color selection marker")
+	}
 	model.handleActionKey("enter")
 	if model.result.Action != ActionTail || !model.result.Follow {
 		t.Fatalf("modal result = %+v", model.result)
@@ -175,6 +183,47 @@ func TestLoaderCommandsUseConfiguredScope(t *testing.T) {
 	}
 }
 
+func TestRefreshCoalescesAndRestartsSpinner(t *testing.T) {
+	model := readyModel()
+	command := model.refresh()
+	batch, ok := command().(tea.BatchMsg)
+	if !ok || len(batch) != 4 {
+		t.Fatalf("refresh command = %#v, want spinner plus three loaders", command())
+	}
+	if !model.statusLoading || !model.localLoading || !model.sharedLoading {
+		t.Fatalf("refresh did not mark every loader active: %+v", model)
+	}
+
+	if repeated := model.refresh(); repeated != nil {
+		t.Fatal("refresh started overlapping loader work")
+	}
+}
+
+func TestScopeReloadRestartsOnlyStoppedSpinner(t *testing.T) {
+	model := readyModel()
+	command, handled := model.handleKey("a")
+	if !handled || command == nil {
+		t.Fatal("scope reload was not started")
+	}
+	batch, ok := command().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("scope command = %#v, want spinner plus local loader", command())
+	}
+	if repeated, handled := model.handleKey("a"); !handled || repeated != nil {
+		t.Fatal("scope toggle started overlapping local discovery")
+	}
+
+	model = readyModel()
+	model.sharedLoading = true
+	command, handled = model.handleKey("a")
+	if !handled || command == nil {
+		t.Fatal("scope reload was not started while the shared spinner was active")
+	}
+	if _, duplicate := command().(tea.BatchMsg); duplicate {
+		t.Fatal("scope reload scheduled a duplicate spinner loop")
+	}
+}
+
 type fakeLoader struct {
 	loadedAll bool
 }
@@ -188,8 +237,8 @@ func (loader *fakeLoader) LoadLocal(_ context.Context, all bool) ([]LocalSession
 	return nil, nil
 }
 
-func (loader *fakeLoader) LoadShared(context.Context) (SharedInventory, error) {
-	return SharedInventory{}, nil
+func (loader *fakeLoader) LoadShared(context.Context) ([]SharedContext, error) {
+	return nil, nil
 }
 
 func readyModel() *Model {

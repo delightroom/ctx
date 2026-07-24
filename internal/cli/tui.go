@@ -12,13 +12,8 @@ import (
 	"github.com/delightroom/ctx/internal/source"
 	"github.com/delightroom/ctx/internal/tailnet"
 	ctxtui "github.com/delightroom/ctx/internal/tui"
+	"golang.org/x/sync/singleflight"
 )
-
-var launchInteractiveTUI = runTUI
-var runTUIProgram = ctxtui.Run
-var runTUIHost = host
-var runTUITail = tail
-var runTUIContinue = continueWork
 
 func tuiCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -31,7 +26,7 @@ func tuiCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 	if !canPrompt(stdin, stdout) {
 		return errors.New("tui requires an interactive terminal")
 	}
-	return launchInteractiveTUI(stdin, stdout, stderr)
+	return runTUI(stdin, stdout, stderr)
 }
 
 func tuiUsage(writer io.Writer) {
@@ -61,14 +56,30 @@ Keys:
 }
 
 func runTUI(stdin io.Reader, stdout, stderr io.Writer) error {
+	return runTUIWith(tuiDependencies{
+		runProgram:   ctxtui.Run,
+		host:         host,
+		tail:         tail,
+		continueWork: continueWork,
+	}, stdin, stdout, stderr)
+}
+
+type tuiDependencies struct {
+	runProgram   func(ctxtui.Config, io.Reader, io.Writer) (ctxtui.Result, error)
+	host         func([]string, io.Writer, io.Writer) error
+	tail         func([]string, io.Reader, io.Writer, io.Writer) error
+	continueWork func([]string, io.Reader, io.Writer, io.Writer) error
+}
+
+func runTUIWith(dependencies tuiDependencies, stdin io.Reader, stdout, stderr io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	result, err := runTUIProgram(ctxtui.Config{
+	result, err := dependencies.runProgram(ctxtui.Config{
 		Context: context.Background(),
 		Version: Version,
-		Loader:  cliTUILoader{cwd: cwd},
+		Loader:  &cliTUILoader{cwd: cwd},
 	}, stdin, stdout)
 	if err != nil {
 		return fmt.Errorf("run TUI: %w", err)
@@ -78,25 +89,27 @@ func runTUI(stdin io.Reader, stdout, stderr io.Writer) error {
 	case ctxtui.ActionNone:
 		return nil
 	case ctxtui.ActionHost:
-		return runTUIHost([]string{"--source", result.SourcePath}, stdout, stderr)
+		return dependencies.host([]string{"--source", result.SourcePath}, stdout, stderr)
 	case ctxtui.ActionTail:
 		args := []string{result.Locator}
 		if result.Follow {
 			args = []string{"--follow", result.Locator}
 		}
-		return runTUITail(args, stdin, stdout, stderr)
+		return dependencies.tail(args, stdin, stdout, stderr)
 	case ctxtui.ActionContinue:
-		return runTUIContinue([]string{result.Locator}, stdin, stdout, stderr)
+		return dependencies.continueWork([]string{result.Locator}, stdin, stdout, stderr)
 	default:
 		return fmt.Errorf("unsupported TUI action %q", result.Action)
 	}
 }
 
 type cliTUILoader struct {
-	cwd string
+	cwd         string
+	statusGroup singleflight.Group
+	statusRead  func(context.Context) (tailnet.Status, error)
 }
 
-func (loader cliTUILoader) LoadStatus(ctx context.Context) (ctxtui.Status, error) {
+func (loader *cliTUILoader) LoadStatus(ctx context.Context) (ctxtui.Status, error) {
 	status := ctxtui.Status{Agents: installedAgents()}
 	if _, err := exec.LookPath("tailscale"); err != nil {
 		status.TailnetError = "Tailscale is not installed"
@@ -105,7 +118,7 @@ func (loader cliTUILoader) LoadStatus(ctx context.Context) (ctxtui.Status, error
 
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	tailnetStatus, err := tailnet.ReadStatus(checkCtx)
+	tailnetStatus, err := loader.readTailnetStatus(checkCtx)
 	if err != nil {
 		status.TailnetError = err.Error()
 		return status, err
@@ -119,7 +132,21 @@ func (loader cliTUILoader) LoadStatus(ctx context.Context) (ctxtui.Status, error
 	return status, nil
 }
 
-func (loader cliTUILoader) LoadLocal(ctx context.Context, all bool) ([]ctxtui.LocalSession, error) {
+func (loader *cliTUILoader) readTailnetStatus(ctx context.Context) (tailnet.Status, error) {
+	value, err, _ := loader.statusGroup.Do("status", func() (any, error) {
+		read := loader.statusRead
+		if read == nil {
+			read = tailnet.ReadStatus
+		}
+		return read(ctx)
+	})
+	if err != nil {
+		return tailnet.Status{}, err
+	}
+	return value.(tailnet.Status), nil
+}
+
+func (loader *cliTUILoader) LoadLocal(ctx context.Context, all bool) ([]ctxtui.LocalSession, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -150,18 +177,18 @@ func (loader cliTUILoader) LoadLocal(ctx context.Context, all bool) ([]ctxtui.Lo
 	return result, nil
 }
 
-func (loader cliTUILoader) LoadShared(ctx context.Context) (ctxtui.SharedInventory, error) {
+func (loader *cliTUILoader) LoadShared(ctx context.Context) ([]ctxtui.SharedContext, error) {
 	discoveryCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	report, err := discoverFeedReport(discoveryCtx, "", 2*time.Second)
+	status, err := loader.readTailnetStatus(discoveryCtx)
 	if err != nil {
-		return ctxtui.SharedInventory{}, err
+		return nil, err
 	}
-	inventory := ctxtui.SharedInventory{
-		Contexts: make([]ctxtui.SharedContext, 0, len(report.feeds)),
-	}
-	for _, feed := range report.feeds {
-		inventory.Contexts = append(inventory.Contexts, ctxtui.SharedContext{
+	bases := tailnet.OnlinePeerURLsFromStatus(status)
+	feeds := discoverFeedBases(discoveryCtx, bases, 2*time.Second)
+	contexts := make([]ctxtui.SharedContext, 0, len(feeds))
+	for _, feed := range feeds {
+		contexts = append(contexts, ctxtui.SharedContext{
 			Name:        feed.Name,
 			Owner:       feed.Owner,
 			Node:        feed.Node,
@@ -171,16 +198,5 @@ func (loader cliTUILoader) LoadShared(ctx context.Context) (ctxtui.SharedInvento
 			UpdatedAt:   feed.UpdatedAt,
 		})
 	}
-	if report.failed > 0 {
-		if len(inventory.Contexts) == 0 {
-			inventory.Warning = fmt.Sprintf(
-				"No ctx service responded on %d tailnet hosts", report.hosts,
-			)
-		} else {
-			inventory.Warning = fmt.Sprintf(
-				"%d of %d tailnet hosts did not respond", report.failed, report.hosts,
-			)
-		}
-	}
-	return inventory, nil
+	return contexts, nil
 }

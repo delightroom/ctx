@@ -36,11 +36,13 @@ Run `ctx` without arguments in a terminal to open the context dashboard.
 $ ctx
 
 ctx 0.3.0  |  TAILNET dev-laptop  |  AGENTS Claude Code + Codex
-╭─ LOCAL SESSIONS  WORKSPACE  2 ─────╮╭─ SHARED CONTEXTS  2 ──────────────╮
-│ Claude  payments             14s ago││ review-host/release-review  Codex │
-│ Codex   ctx                   2m ago││ api-host/payment-debug      Claude│
+╭─────────────────────────────────────╮╭───────────────────────────────────╮
+│ > LOCAL SESSIONS  WORKSPACE  2      ││   SHARED CONTEXTS  2             │
+│ > Claude  payments           14s ago││   review-host/release-review Codex│
+│   Codex   ctx                 2m ago││   api-host/payment-debug   Claude│
 ╰─────────────────────────────────────╯╰───────────────────────────────────╯
-╭─ SELECTION ──────────────────────────────────────────────────────────────╮
+╭─────────────────────────────────────────────────────────────────────────╮
+│ SELECTION                                                               │
 │ Provider Claude  Project payments  Updated 14s ago                       │
 │ Action: Enter or h to host this session                                 │
 ╰─────────────────────────────────────────────────────────────────────────╯

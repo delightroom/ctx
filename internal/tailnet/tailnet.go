@@ -92,6 +92,10 @@ func OnlinePeerURLs(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return OnlinePeerURLsFromStatus(status), nil
+}
+
+func OnlinePeerURLsFromStatus(status Status) []string {
 	var result []string
 	if status.Self.DNSName != "" {
 		result = append(result, fmt.Sprintf("https://%s:%d", status.Self.DNSName, ServePort))
@@ -101,7 +105,7 @@ func OnlinePeerURLs(ctx context.Context) ([]string, error) {
 			result = append(result, fmt.Sprintf("https://%s:%d", peer.DNSName, ServePort))
 		}
 	}
-	return result, nil
+	return result
 }
 
 func ShortName(peer Peer) string {

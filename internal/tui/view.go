@@ -113,7 +113,11 @@ func (m *Model) renderLocalPanel(width, height int) string {
 	}
 	items := m.filteredLocal()
 	title := fmt.Sprintf("LOCAL SESSIONS  %s  %d", scope, len(items))
-	lines := []string{m.styles.title.Render(title)}
+	titleMarker := "  "
+	if m.focus == localPanel {
+		titleMarker = "> "
+	}
+	lines := []string{m.styles.title.Render(titleMarker + title)}
 	if m.filtering && m.focus == localPanel {
 		lines = append(lines, m.filterInput.View())
 	} else if m.localFilter != "" {
@@ -152,16 +156,16 @@ func (m *Model) renderLocalPanel(width, height int) string {
 func (m *Model) renderSharedPanel(width, height int) string {
 	items := m.filteredShared()
 	title := fmt.Sprintf("SHARED CONTEXTS  %d", len(items))
-	lines := []string{m.styles.title.Render(title)}
+	titleMarker := "  "
+	if m.focus == sharedPanel {
+		titleMarker = "> "
+	}
+	lines := []string{m.styles.title.Render(titleMarker + title)}
 	if m.filtering && m.focus == sharedPanel {
 		lines = append(lines, m.filterInput.View())
 	} else if m.sharedFilter != "" {
 		lines = append(lines, m.styles.muted.Render("/ "+m.sharedFilter))
 	}
-	if m.sharedWarning != "" {
-		lines = append(lines, m.styles.warning.Render(cellTruncate(m.sharedWarning, width-6)))
-	}
-
 	rows := panelRows(height, len(lines))
 	switch {
 	case m.sharedLoading:
@@ -244,7 +248,12 @@ func (m *Model) renderPanel(content string, width, height int, active bool) stri
 }
 
 func (m *Model) renderRow(value string, width int, selected bool) string {
-	value = padRight(cellTruncate(value, width), width)
+	marker := "  "
+	if selected {
+		marker = "> "
+	}
+	contentWidth := max(1, width-lipgloss.Width(marker))
+	value = marker + padRight(cellTruncate(value, contentWidth), contentWidth)
 	if selected {
 		return m.styles.rowSelected.Render(value)
 	}
@@ -259,7 +268,12 @@ func (m *Model) renderActionModal() string {
 		if !option.enabled {
 			label += "  unavailable"
 		}
-		label = padRight(cellTruncate(label, 48), 48)
+		marker := "  "
+		if index == m.actionIndex {
+			marker = "> "
+		}
+		labelWidth := 48 - lipgloss.Width(marker)
+		label = marker + padRight(cellTruncate(label, labelWidth), labelWidth)
 		if index == m.actionIndex {
 			lines = append(lines, m.styles.modalSelected.Render(label))
 		} else if option.enabled {

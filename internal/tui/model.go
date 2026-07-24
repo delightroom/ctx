@@ -58,15 +58,10 @@ func (s SharedContext) Locator() string {
 	return fmt.Sprintf("ctx://%s/%s", s.Node, s.Name)
 }
 
-type SharedInventory struct {
-	Contexts []SharedContext
-	Warning  string
-}
-
 type Loader interface {
 	LoadStatus(context.Context) (Status, error)
 	LoadLocal(context.Context, bool) ([]LocalSession, error)
-	LoadShared(context.Context) (SharedInventory, error)
+	LoadShared(context.Context) ([]SharedContext, error)
 }
 
 type Config struct {
@@ -103,9 +98,9 @@ type localLoadedMsg struct {
 }
 
 type sharedLoadedMsg struct {
-	sequence  int
-	inventory SharedInventory
-	err       error
+	sequence int
+	contexts []SharedContext
+	err      error
 }
 
 type Model struct {
@@ -136,7 +131,6 @@ type Model struct {
 	shared        []SharedContext
 	sharedLoading bool
 	sharedError   string
-	sharedWarning string
 	sharedSeq     int
 	sharedIndex   int
 	sharedFilter  string
@@ -199,6 +193,7 @@ func Run(config Config, input io.Reader, output io.Writer) (Result, error) {
 		NewModel(config),
 		tea.WithInput(input),
 		tea.WithOutput(output),
+		tea.WithContext(runCtx),
 	)
 	final, err := program.Run()
 	if err != nil {
@@ -249,8 +244,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case sharedLoadedMsg:
 		if msg.sequence == m.sharedSeq {
 			m.sharedLoading = false
-			m.shared = msg.inventory.Contexts
-			m.sharedWarning = msg.inventory.Warning
+			m.shared = msg.contexts
 			m.sharedError = errorText(msg.err)
 			m.clampSelection()
 		}
@@ -341,13 +335,21 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 		m.startFilter()
 		return m.filterInput.Focus(), true
 	case "a":
+		if m.localLoading {
+			return nil, true
+		}
+		spinnerRunning := m.anyLoading()
 		m.allLocal = !m.allLocal
 		m.localIndex = 0
 		m.localSeq++
 		m.localLoading = true
 		m.localError = ""
 		m.notice = ""
-		return m.loadLocal(m.localSeq), true
+		command := m.loadLocal(m.localSeq)
+		if spinnerRunning {
+			return command, true
+		}
+		return tea.Batch(m.spinner.Tick, command), true
 	case "r":
 		return m.refresh(), true
 	case "enter":
@@ -477,6 +479,9 @@ func (m *Model) openActions() {
 }
 
 func (m *Model) refresh() tea.Cmd {
+	if m.anyLoading() {
+		return nil
+	}
 	m.statusSeq++
 	m.localSeq++
 	m.sharedSeq++
@@ -486,9 +491,9 @@ func (m *Model) refresh() tea.Cmd {
 	m.statusError = ""
 	m.localError = ""
 	m.sharedError = ""
-	m.sharedWarning = ""
 	m.notice = ""
 	return tea.Batch(
+		m.spinner.Tick,
 		m.loadStatus(m.statusSeq),
 		m.loadLocal(m.localSeq),
 		m.loadShared(m.sharedSeq),
@@ -521,8 +526,8 @@ func (m *Model) loadShared(sequence int) tea.Cmd {
 		if m.loader == nil {
 			return sharedLoadedMsg{sequence: sequence, err: fmt.Errorf("shared context loader is unavailable")}
 		}
-		inventory, err := m.loader.LoadShared(m.ctx)
-		return sharedLoadedMsg{sequence: sequence, inventory: inventory, err: err}
+		contexts, err := m.loader.LoadShared(m.ctx)
+		return sharedLoadedMsg{sequence: sequence, contexts: contexts, err: err}
 	}
 }
 

@@ -35,7 +35,7 @@ var Version = "dev"
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		if canPrompt(stdin, stdout) {
-			if err := launchInteractiveTUI(stdin, stdout, stderr); err != nil {
+			if err := runTUI(stdin, stdout, stderr); err != nil {
 				if errors.Is(err, errCancelled) {
 					return 0
 				}
@@ -570,59 +570,90 @@ func relativeTime(value time.Time) string {
 }
 
 func discoverFeeds(ctx context.Context, host string, timeout time.Duration) ([]protocol.FeedSummary, error) {
-	report, err := discoverFeedReport(ctx, host, timeout)
-	return report.feeds, err
-}
-
-type feedDiscoveryReport struct {
-	feeds  []protocol.FeedSummary
-	hosts  int
-	failed int
-}
-
-func discoverFeedReport(ctx context.Context, host string, timeout time.Duration) (feedDiscoveryReport, error) {
 	var bases []string
 	if host != "" {
 		base, err := tailnet.ResolveHost(ctx, host)
 		if err != nil {
-			return feedDiscoveryReport{}, err
+			return nil, err
 		}
 		bases = []string{base}
 	} else {
 		var err error
 		bases, err = tailnet.OnlinePeerURLs(ctx)
 		if err != nil {
-			return feedDiscoveryReport{}, err
+			return nil, err
 		}
 	}
 
-	type result struct {
-		feeds []protocol.FeedSummary
-		err   error
+	return discoverFeedBases(ctx, bases, timeout), nil
+}
+
+func discoverFeedBases(
+	ctx context.Context,
+	bases []string,
+	timeout time.Duration,
+) []protocol.FeedSummary {
+	client := ctxclient.New(timeout)
+	return probeFeedBases(ctx, bases, timeout, client.List)
+}
+
+const maxConcurrentHostProbes = 8
+
+type feedListFunc func(context.Context, string) ([]protocol.FeedSummary, error)
+
+func probeFeedBases(
+	ctx context.Context,
+	bases []string,
+	timeout time.Duration,
+	list feedListFunc,
+) []protocol.FeedSummary {
+	if len(bases) == 0 {
+		return nil
 	}
-	results := make(chan result, len(bases))
-	var wait sync.WaitGroup
+
+	jobs := make(chan string, len(bases))
 	for _, base := range bases {
+		jobs <- base
+	}
+	close(jobs)
+
+	results := make(chan []protocol.FeedSummary, len(bases))
+	var wait sync.WaitGroup
+	workers := min(maxConcurrentHostProbes, len(bases))
+	for range workers {
 		wait.Add(1)
-		go func(base string) {
+		go func() {
 			defer wait.Done()
-			requestCtx, requestCancel := context.WithTimeout(ctx, timeout)
-			defer requestCancel()
-			feeds, err := ctxclient.New(timeout).List(requestCtx, base)
-			results <- result{feeds: feeds, err: err}
-		}(base)
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case base, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					requestCtx, requestCancel := context.WithTimeout(ctx, timeout)
+					feeds, err := list(requestCtx, base)
+					requestCancel()
+					if err == nil {
+						results <- feeds
+					}
+				}
+			}
+		}()
 	}
 	wait.Wait()
 	close(results)
 
 	var feeds []protocol.FeedSummary
-	failed := 0
 	for item := range results {
-		if item.err != nil {
-			failed++
-			continue
-		}
-		feeds = append(feeds, item.feeds...)
+		feeds = append(feeds, item...)
 	}
 	sort.Slice(feeds, func(i, j int) bool {
 		if feeds[i].Node == feeds[j].Node {
@@ -630,5 +661,5 @@ func discoverFeedReport(ctx context.Context, host string, timeout time.Duration)
 		}
 		return feeds[i].Node < feeds[j].Node
 	})
-	return feedDiscoveryReport{feeds: feeds, hosts: len(bases), failed: failed}, nil
+	return feeds
 }
