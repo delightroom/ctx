@@ -26,6 +26,8 @@ const (
 	maxDigestBytes = 96 * 1024
 )
 
+var errUnrecognizedSession = errors.New("unrecognized session")
+
 type Snapshotter interface {
 	Snapshot() (protocol.Digest, error)
 	Path() string
@@ -34,6 +36,15 @@ type Snapshotter interface {
 type File struct {
 	path  string
 	agent string
+}
+
+type Session struct {
+	SourceAgent string    `json:"source_agent"`
+	SessionID   string    `json:"session_id"`
+	Project     string    `json:"project"`
+	CWD         string    `json:"cwd"`
+	Path        string    `json:"path"`
+	ModifiedAt  time.Time `json:"modified_at"`
 }
 
 func Open(path string) (*File, error) {
@@ -45,23 +56,92 @@ func Open(path string) (*File, error) {
 }
 
 func Discover(cwd string) (*File, error) {
-	var candidates []candidate
-
-	claude, err := claudeCandidates(cwd)
-	if err == nil {
-		candidates = append(candidates, claude...)
+	sessions, err := List(cwd)
+	if err != nil {
+		return nil, err
 	}
-	codex, err := codexCandidates(cwd)
-	if err == nil {
-		candidates = append(candidates, codex...)
-	}
-	if len(candidates) == 0 {
+	if len(sessions) == 0 {
 		return nil, fmt.Errorf("no Claude or Codex session found for %s; pass --source explicitly", cwd)
 	}
+	return &File{path: sessions[0].Path, agent: sessions[0].SourceAgent}, nil
+}
+
+// List returns hostable Claude Code and Codex sessions for cwd, newest first.
+func List(cwd string) ([]Session, error) {
+	return listSessions(cwd, false)
+}
+
+// ListAll returns hostable Claude Code and Codex sessions across all workspaces,
+// newest first.
+func ListAll() ([]Session, error) {
+	return listSessions("", true)
+}
+
+func listSessions(cwd string, all bool) ([]Session, error) {
+	var candidates []candidate
+	var providerErrors []error
+
+	var claude []candidate
+	var err error
+	if all {
+		claude, err = allClaudeCandidates()
+	} else {
+		claude, err = claudeCandidates(cwd)
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		providerErrors = append(providerErrors, fmt.Errorf("scan Claude sessions: %w", err))
+	} else {
+		candidates = append(candidates, claude...)
+	}
+
+	var codex []candidate
+	if all {
+		codex, err = allCodexCandidates()
+	} else {
+		codex, err = codexCandidates(cwd)
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		providerErrors = append(providerErrors, fmt.Errorf("scan Codex sessions: %w", err))
+	} else {
+		candidates = append(candidates, codex...)
+	}
+
+	if len(candidates) == 0 {
+		if len(providerErrors) > 0 {
+			return nil, errors.Join(providerErrors...)
+		}
+		return nil, nil
+	}
+
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].modified.Equal(candidates[j].modified) {
+			return candidates[i].path < candidates[j].path
+		}
 		return candidates[i].modified.After(candidates[j].modified)
 	})
-	return &File{path: candidates[0].path, agent: candidates[0].agent}, nil
+
+	sessions := make([]Session, 0, len(candidates))
+	for _, candidate := range candidates {
+		session, inspectErr := inspectSession(candidate)
+		if inspectErr != nil {
+			if errors.Is(inspectErr, errUnrecognizedSession) {
+				continue
+			}
+			if !errors.Is(inspectErr, fs.ErrNotExist) {
+				providerErrors = append(providerErrors, inspectErr)
+			}
+			continue
+		}
+		if session.CWD == "" && !all {
+			session.CWD = cwd
+			session.Project = filepath.Base(filepath.Clean(cwd))
+		}
+		sessions = append(sessions, session)
+	}
+	if len(sessions) == 0 && len(providerErrors) > 0 {
+		return nil, errors.Join(providerErrors...)
+	}
+	return sessions, nil
 }
 
 func (f *File) Path() string { return f.path }
@@ -139,16 +219,50 @@ type candidate struct {
 var nonAlphanumeric = regexp.MustCompile(`[^A-Za-z0-9]`)
 
 func claudeCandidates(cwd string) ([]candidate, error) {
-	home, err := os.UserHomeDir()
+	root, err := claudeProjectsRoot()
 	if err != nil {
 		return nil, err
 	}
-	root := os.Getenv("CLAUDE_CONFIG_DIR")
-	if root == "" {
-		root = filepath.Join(home, ".claude")
+	project := filepath.Join(root, nonAlphanumeric.ReplaceAllString(cwd, "-"))
+	return candidatesInDirectory(project, "claude-code")
+}
+
+func allClaudeCandidates() ([]candidate, error) {
+	root, err := claudeProjectsRoot()
+	if err != nil {
+		return nil, err
 	}
-	project := filepath.Join(root, "projects", nonAlphanumeric.ReplaceAllString(cwd, "-"))
-	entries, err := os.ReadDir(project)
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var result []candidate
+	for _, project := range projects {
+		if !project.IsDir() {
+			continue
+		}
+		candidates, readErr := candidatesInDirectory(filepath.Join(root, project.Name()), "claude-code")
+		if readErr == nil {
+			result = append(result, candidates...)
+		}
+	}
+	return result, nil
+}
+
+func claudeProjectsRoot() (string, error) {
+	root := os.Getenv("CLAUDE_CONFIG_DIR")
+	if root != "" {
+		return filepath.Join(root, "projects"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "projects"), nil
+}
+
+func candidatesInDirectory(directory, agent string) ([]candidate, error) {
+	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +274,8 @@ func claudeCandidates(cwd string) ([]candidate, error) {
 		info, err := entry.Info()
 		if err == nil {
 			result = append(result, candidate{
-				path:     filepath.Join(project, entry.Name()),
-				agent:    "claude-code",
+				path:     filepath.Join(directory, entry.Name()),
+				agent:    agent,
 				modified: info.ModTime(),
 			})
 		}
@@ -170,31 +284,117 @@ func claudeCandidates(cwd string) ([]candidate, error) {
 }
 
 func codexCandidates(cwd string) ([]candidate, error) {
-	home, err := os.UserHomeDir()
+	candidates, err := allCodexCandidates()
 	if err != nil {
 		return nil, err
 	}
-	root := os.Getenv("CODEX_HOME")
-	if root == "" {
-		root = filepath.Join(home, ".codex")
+	var result []candidate
+	for _, candidate := range candidates {
+		matches, matchErr := codexSessionCWD(candidate.path, cwd)
+		if matchErr == nil && matches {
+			result = append(result, candidate)
+		}
 	}
-	root = filepath.Join(root, "sessions")
+	return result, nil
+}
+
+func allCodexCandidates() ([]candidate, error) {
+	root, err := codexSessionsRoot()
+	if err != nil {
+		return nil, err
+	}
 	var result []candidate
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		matches, err := codexSessionCWD(path, cwd)
-		if err == nil && matches {
+		info, infoErr := entry.Info()
+		if infoErr == nil {
 			result = append(result, candidate{path: path, agent: "codex-cli", modified: info.ModTime()})
 		}
 		return nil
 	})
 	return result, err
+}
+
+func codexSessionsRoot() (string, error) {
+	root := os.Getenv("CODEX_HOME")
+	if root != "" {
+		return filepath.Join(root, "sessions"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codex", "sessions"), nil
+}
+
+func inspectSession(candidate candidate) (Session, error) {
+	session := Session{
+		SourceAgent: candidate.agent,
+		Path:        candidate.path,
+		ModifiedAt:  candidate.modified,
+	}
+	handle, err := os.Open(candidate.path)
+	if err != nil {
+		return Session{}, fmt.Errorf("inspect session %s: %w", candidate.path, err)
+	}
+	defer handle.Close()
+
+	scanner := bufio.NewScanner(handle)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	recognized := false
+	for scanner.Scan() {
+		var envelope struct {
+			Type      string `json:"type"`
+			SessionID string `json:"sessionId"`
+			CWD       string `json:"cwd"`
+			Payload   struct {
+				ID  string `json:"id"`
+				CWD string `json:"cwd"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &envelope) != nil {
+			continue
+		}
+		switch candidate.agent {
+		case "claude-code":
+			if envelope.SessionID != "" || envelope.Type == "assistant" || envelope.Type == "user" {
+				recognized = true
+			}
+			if envelope.SessionID != "" {
+				session.SessionID = envelope.SessionID
+			}
+			if envelope.CWD != "" {
+				session.CWD = envelope.CWD
+			}
+		case "codex-cli":
+			if envelope.Type == "session_meta" {
+				recognized = true
+				session.SessionID = envelope.Payload.ID
+				session.CWD = envelope.Payload.CWD
+			}
+		}
+		if session.SessionID != "" && session.CWD != "" {
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return Session{}, fmt.Errorf("inspect session %s: %w", candidate.path, err)
+	}
+	if !recognized {
+		return Session{}, fmt.Errorf("%w: %s", errUnrecognizedSession, candidate.path)
+	}
+	if session.SessionID == "" {
+		session.SessionID = strings.TrimSuffix(filepath.Base(candidate.path), filepath.Ext(candidate.path))
+	}
+	if session.CWD != "" {
+		session.Project = filepath.Base(filepath.Clean(session.CWD))
+	}
+	return session, nil
 }
 
 func codexSessionCWD(path, cwd string) (bool, error) {

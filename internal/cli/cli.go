@@ -14,10 +14,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	ctxclient "github.com/delightroom/ctx/internal/client"
@@ -72,6 +74,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = fmt.Errorf("unknown command %q", args[0])
 	}
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		if errors.Is(err, errCancelled) {
 			return 0
 		}
@@ -87,6 +92,7 @@ func usage(writer io.Writer) {
 Usage:
   ctx
   ctx host [--name NAME] [--source SESSION.jsonl]
+  ctx host ls [--all] [--json]
   ctx ls [HOST]
   ctx tail [-f] [HOST/FEED]
   ctx continue [--with claude|codex] [HOST/FEED]
@@ -97,6 +103,7 @@ Usage:
 Commands:
   ctx        Open the interactive context launcher
   host       Publish the current Claude or Codex session
+  host ls    List local Claude and Codex sessions available to host
   ls         List feeds from one host or discover tailnet hosts
   tail       Print a feed; -f follows new revisions
   continue   Start a new local agent from a pinned neutral digest
@@ -106,6 +113,10 @@ Commands:
 }
 
 func host(args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "ls" {
+		return hostList(args[1:], stdout, stderr)
+	}
+
 	flags := flag.NewFlagSet("host", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	name := flags.String("name", "", "feed name (defaults to project name)")
@@ -221,6 +232,59 @@ func host(args []string, stdout, stderr io.Writer) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+func hostList(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("host ls", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	all := flags.Bool("all", false, "include sessions from every workspace")
+	asJSON := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("host ls takes flags only")
+	}
+
+	var sessions []source.Session
+	var err error
+	scope := "this workspace"
+	if *all {
+		sessions, err = source.ListAll()
+		scope = "local session stores"
+	} else {
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return cwdErr
+		}
+		sessions, err = source.List(cwd)
+	}
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		if sessions == nil {
+			sessions = []source.Session{}
+		}
+		return json.NewEncoder(stdout).Encode(sessions)
+	}
+	if len(sessions) == 0 {
+		fmt.Fprintf(stdout, "No Claude or Codex sessions found in %s.\n", scope)
+		return nil
+	}
+
+	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "AGENT\tPROJECT\tUPDATED\tSESSION\tSOURCE")
+	for _, session := range sessions {
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
+			displayAgent(session.SourceAgent),
+			projectName(session.CWD),
+			relativeTime(session.ModifiedAt),
+			shortSessionID(session.SessionID),
+			session.Path,
+		)
+	}
+	return table.Flush()
 }
 
 func list(args []string, stdout, stderr io.Writer) error {
@@ -471,6 +535,21 @@ func displayAgent(value string) string {
 	default:
 		return value
 	}
+}
+
+func shortSessionID(value string) string {
+	const visible = 12
+	if len(value) <= visible {
+		return value
+	}
+	return value[:visible]
+}
+
+func projectName(cwd string) string {
+	if cwd == "" {
+		return "-"
+	}
+	return filepath.Base(filepath.Clean(cwd))
 }
 
 func relativeTime(value time.Time) string {
