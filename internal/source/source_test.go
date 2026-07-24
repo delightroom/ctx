@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClaudeSnapshot(t *testing.T) {
@@ -86,11 +87,78 @@ func TestRevisionIsStableForSameContent(t *testing.T) {
 	}
 }
 
+func TestListFindsClaudeAndCodexSessionsForWorkspace(t *testing.T) {
+	claudeRoot := filepath.Join(t.TempDir(), ".claude")
+	codexRoot := filepath.Join(t.TempDir(), ".codex")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeRoot)
+	t.Setenv("CODEX_HOME", codexRoot)
+
+	cwd := filepath.Join(t.TempDir(), "payments")
+	claudePath := filepath.Join(
+		claudeRoot,
+		"projects",
+		nonAlphanumeric.ReplaceAllString(cwd, "-"),
+		"claude-session.jsonl",
+	)
+	codexPath := filepath.Join(codexRoot, "sessions", "2026", "07", "24", "codex-session.jsonl")
+	otherPath := filepath.Join(codexRoot, "sessions", "2026", "07", "23", "other-session.jsonl")
+
+	writeSessionFile(t, claudePath,
+		`{"type":"user","sessionId":"claude-1","cwd":"`+cwd+`","message":{"role":"user","content":"hello"}}`)
+	writeSessionFile(t, codexPath,
+		`{"type":"session_meta","payload":{"id":"codex-1","cwd":"`+cwd+`"}}`)
+	writeSessionFile(t, otherPath,
+		`{"type":"session_meta","payload":{"id":"codex-other","cwd":"/work/other"}}`)
+
+	now := time.Now()
+	if err := os.Chtimes(claudePath, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(codexPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := List(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %+v, want two", sessions)
+	}
+	if sessions[0].SourceAgent != "codex-cli" || sessions[0].SessionID != "codex-1" {
+		t.Fatalf("newest session = %+v", sessions[0])
+	}
+	if sessions[1].SourceAgent != "claude-code" || sessions[1].SessionID != "claude-1" {
+		t.Fatalf("older session = %+v", sessions[1])
+	}
+	for _, session := range sessions {
+		if session.CWD != cwd || session.Project != "payments" {
+			t.Fatalf("unexpected workspace metadata: %+v", session)
+		}
+	}
+
+	all, err := ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("all sessions = %+v, want three", all)
+	}
+}
+
 func writeFixture(t *testing.T, name, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
+	writeSessionFile(t, path, content)
+	return path
+}
+
+func writeSessionFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }

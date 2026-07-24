@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -71,13 +74,67 @@ func TestDoctorJSON(t *testing.T) {
 	}
 }
 
+func TestHostListJSON(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), ".claude"))
+	codexRoot := filepath.Join(t.TempDir(), ".codex")
+	t.Setenv("CODEX_HOME", codexRoot)
+
+	sessionPath := filepath.Join(codexRoot, "sessions", "2026", "07", "24", "session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"type":"session_meta","payload":{"id":"codex-list-1","cwd":` +
+		strconv.Quote(workspace) + `}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"host", "ls", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("Run exit code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"source_agent":"codex-cli"`) ||
+		!strings.Contains(stdout.String(), `"session_id":"codex-list-1"`) ||
+		!strings.Contains(stdout.String(), `"cwd":`+strconv.Quote(workspace)) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"host", "ls"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("Run exit code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "AGENT") ||
+		!strings.Contains(stdout.String(), "Codex") ||
+		!strings.Contains(stdout.String(), "codex-list-1") ||
+		!strings.Contains(stdout.String(), sessionPath) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestHostListHelpExitsSuccessfully(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"host", "ls", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("Run exit code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage of host ls:") ||
+		strings.Contains(stderr.String(), "ctx: flag: help requested") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestCompletion(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run([]string{"completion", "fish"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("Run exit code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "complete -c ctx") {
+	if !strings.Contains(stdout.String(), "complete -c ctx") ||
+		!strings.Contains(stdout.String(), "__fish_seen_subcommand_from host") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

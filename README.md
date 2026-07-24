@@ -61,6 +61,7 @@ The stable command interface is:
 
 ```text
 ctx host
+ctx host ls
 ctx ls
 ctx tail
 ctx continue
@@ -88,6 +89,26 @@ Use an explicit session when discovery is ambiguous:
 ```bash
 ctx host --source ~/.claude/projects/.../session.jsonl
 ```
+
+List every hostable Claude Code and Codex session for the current workspace:
+
+```bash
+ctx host ls
+```
+
+Sessions are sorted newest first. The listing includes the provider, project,
+last-modified time, session ID, and exact source path accepted by
+`ctx host --source`.
+
+Scan every workspace in both local session stores when needed:
+
+```bash
+ctx host ls --all
+ctx host ls --json
+```
+
+Discovery reads session metadata only; conversation events are not rendered by
+the listing command.
 
 For local development without Tailscale:
 
