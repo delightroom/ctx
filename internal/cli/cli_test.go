@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/delightroom/ctx/internal/protocol"
+	ctxtui "github.com/delightroom/ctx/internal/tui"
 )
 
 func TestFeedName(t *testing.T) {
@@ -33,6 +37,162 @@ func TestRunWithoutTerminalPrintsHelp(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "ctx — tailnet-native AI context sharing") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestBareInteractiveRunLaunchesTUI(t *testing.T) {
+	terminal, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	t.Setenv("CI", "")
+
+	original := launchInteractiveTUI
+	called := false
+	launchInteractiveTUI = func(io.Reader, io.Writer, io.Writer) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() {
+		launchInteractiveTUI = original
+	})
+
+	if code := Run(nil, terminal, terminal, terminal); code != 0 {
+		t.Fatalf("Run exit code = %d", code)
+	}
+	if !called {
+		t.Fatal("bare interactive ctx did not launch the TUI")
+	}
+}
+
+func TestExplicitTUIRequiresTerminalAndProvidesHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"tui"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Fatalf("Run exit code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "tui requires an interactive terminal") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"tui", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("Run exit code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ctx tui — interactive context dashboard") ||
+		!strings.Contains(stdout.String(), "Toggle workspace/all local sessions") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestTUIActionHandoff(t *testing.T) {
+	originalProgram := runTUIProgram
+	originalHost := runTUIHost
+	originalTail := runTUITail
+	originalContinue := runTUIContinue
+	t.Cleanup(func() {
+		runTUIProgram = originalProgram
+		runTUIHost = originalHost
+		runTUITail = originalTail
+		runTUIContinue = originalContinue
+	})
+
+	var selected ctxtui.Result
+	runTUIProgram = func(config ctxtui.Config, _ io.Reader, _ io.Writer) (ctxtui.Result, error) {
+		if config.Loader == nil || config.Version != Version {
+			t.Fatalf("TUI config = %+v", config)
+		}
+		if _, ok := config.Context.Deadline(); ok {
+			t.Fatal("TUI context unexpectedly has a deadline")
+		}
+		return selected, nil
+	}
+
+	var command string
+	var commandArgs []string
+	runTUIHost = func(args []string, _, _ io.Writer) error {
+		command = "host"
+		commandArgs = append([]string(nil), args...)
+		return nil
+	}
+	runTUITail = func(args []string, _ io.Reader, _, _ io.Writer) error {
+		command = "tail"
+		commandArgs = append([]string(nil), args...)
+		return nil
+	}
+	runTUIContinue = func(args []string, _ io.Reader, _, _ io.Writer) error {
+		command = "continue"
+		commandArgs = append([]string(nil), args...)
+		return nil
+	}
+
+	tests := []struct {
+		name       string
+		result     ctxtui.Result
+		want       string
+		wantArgs   []string
+		wantCalled bool
+	}{
+		{
+			name:       "host",
+			result:     ctxtui.Result{Action: ctxtui.ActionHost, SourcePath: "/tmp/session.jsonl"},
+			want:       "host",
+			wantArgs:   []string{"--source", "/tmp/session.jsonl"},
+			wantCalled: true,
+		},
+		{
+			name:       "tail",
+			result:     ctxtui.Result{Action: ctxtui.ActionTail, Locator: "ctx://node/feed"},
+			want:       "tail",
+			wantArgs:   []string{"ctx://node/feed"},
+			wantCalled: true,
+		},
+		{
+			name:       "follow",
+			result:     ctxtui.Result{Action: ctxtui.ActionTail, Locator: "ctx://node/feed", Follow: true},
+			want:       "tail",
+			wantArgs:   []string{"--follow", "ctx://node/feed"},
+			wantCalled: true,
+		},
+		{
+			name:       "continue",
+			result:     ctxtui.Result{Action: ctxtui.ActionContinue, Locator: "ctx://node/feed"},
+			want:       "continue",
+			wantArgs:   []string{"ctx://node/feed"},
+			wantCalled: true,
+		},
+		{name: "quit", result: ctxtui.Result{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selected = test.result
+			command = ""
+			commandArgs = nil
+			if err := runTUI(strings.NewReader(""), io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantCalled && command != test.want {
+				t.Fatalf("command = %q, want %q", command, test.want)
+			}
+			if !test.wantCalled && command != "" {
+				t.Fatalf("unexpected command = %q", command)
+			}
+			if strings.Join(commandArgs, "\x00") != strings.Join(test.wantArgs, "\x00") {
+				t.Fatalf("args = %q, want %q", commandArgs, test.wantArgs)
+			}
+		})
+	}
+}
+
+func TestTUILoaderHonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := (cliTUILoader{}).LoadLocal(ctx, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("LoadLocal error = %v", err)
 	}
 }
 
@@ -134,7 +294,8 @@ func TestCompletion(t *testing.T) {
 		t.Fatalf("Run exit code = %d, stderr = %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "complete -c ctx") ||
-		!strings.Contains(stdout.String(), "__fish_seen_subcommand_from host") {
+		!strings.Contains(stdout.String(), "__fish_seen_subcommand_from host") ||
+		!strings.Contains(stdout.String(), `"tui host ls tail`) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

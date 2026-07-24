@@ -35,7 +35,7 @@ var Version = "dev"
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		if canPrompt(stdin, stdout) {
-			if err := launch(stdin, stdout, stderr); err != nil {
+			if err := launchInteractiveTUI(stdin, stdout, stderr); err != nil {
 				if errors.Is(err, errCancelled) {
 					return 0
 				}
@@ -64,6 +64,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = update(args[1:], stdin, stdout, stderr)
 	case "completion":
 		err = completion(args[1:], stdout)
+	case "tui":
+		err = tuiCommand(args[1:], stdin, stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, Version)
 		return 0
@@ -91,6 +93,7 @@ func usage(writer io.Writer) {
 
 Usage:
   ctx
+  ctx tui
   ctx host [--name NAME] [--source SESSION.jsonl]
   ctx host ls [--all] [--json]
   ctx ls [HOST]
@@ -101,7 +104,8 @@ Usage:
   ctx completion bash|zsh|fish
 
 Commands:
-  ctx        Open the interactive context launcher
+  ctx        Open the interactive context dashboard
+  tui        Open the context dashboard explicitly
   host       Publish the current Claude or Codex session
   host ls    List local Claude and Codex sessions available to host
   ls         List feeds from one host or discover tailnet hosts
@@ -109,7 +113,9 @@ Commands:
   continue   Start a new local agent from a pinned neutral digest
   doctor     Diagnose installation, Tailscale, and agent sessions
   update     Update ctx using its original installation method
-  completion Generate shell completion setup`)
+  completion Generate shell completion setup
+
+Run "ctx tui --help" for dashboard keyboard controls.`)
 }
 
 func host(args []string, stdout, stderr io.Writer) error {
@@ -564,23 +570,35 @@ func relativeTime(value time.Time) string {
 }
 
 func discoverFeeds(ctx context.Context, host string, timeout time.Duration) ([]protocol.FeedSummary, error) {
+	report, err := discoverFeedReport(ctx, host, timeout)
+	return report.feeds, err
+}
+
+type feedDiscoveryReport struct {
+	feeds  []protocol.FeedSummary
+	hosts  int
+	failed int
+}
+
+func discoverFeedReport(ctx context.Context, host string, timeout time.Duration) (feedDiscoveryReport, error) {
 	var bases []string
 	if host != "" {
 		base, err := tailnet.ResolveHost(ctx, host)
 		if err != nil {
-			return nil, err
+			return feedDiscoveryReport{}, err
 		}
 		bases = []string{base}
 	} else {
 		var err error
 		bases, err = tailnet.OnlinePeerURLs(ctx)
 		if err != nil {
-			return nil, err
+			return feedDiscoveryReport{}, err
 		}
 	}
 
 	type result struct {
 		feeds []protocol.FeedSummary
+		err   error
 	}
 	results := make(chan result, len(bases))
 	var wait sync.WaitGroup
@@ -591,16 +609,19 @@ func discoverFeeds(ctx context.Context, host string, timeout time.Duration) ([]p
 			requestCtx, requestCancel := context.WithTimeout(ctx, timeout)
 			defer requestCancel()
 			feeds, err := ctxclient.New(timeout).List(requestCtx, base)
-			if err == nil {
-				results <- result{feeds: feeds}
-			}
+			results <- result{feeds: feeds, err: err}
 		}(base)
 	}
 	wait.Wait()
 	close(results)
 
 	var feeds []protocol.FeedSummary
+	failed := 0
 	for item := range results {
+		if item.err != nil {
+			failed++
+			continue
+		}
 		feeds = append(feeds, item.feeds...)
 	}
 	sort.Slice(feeds, func(i, j int) bool {
@@ -609,5 +630,5 @@ func discoverFeeds(ctx context.Context, host string, timeout time.Duration) ([]p
 		}
 		return feeds[i].Node < feeds[j].Node
 	})
-	return feeds, nil
+	return feedDiscoveryReport{feeds: feeds, hosts: len(bases), failed: failed}, nil
 }
