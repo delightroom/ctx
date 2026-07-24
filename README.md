@@ -9,7 +9,7 @@ session files or host-authored executable code.
 The supported entrypoint for macOS and Linux is:
 
 ```bash
-curl -fsSL https://ctx.droom.dev/install.sh | sh
+curl -fsSL https://delightroom.github.io/ctx/install.sh | sh
 ctx
 ```
 
@@ -20,10 +20,10 @@ matching release, verifies its SHA-256 checksum, and installs `ctx` into
 Pin a release or choose an installation directory when needed:
 
 ```bash
-curl -fsSL https://ctx.droom.dev/install.sh | \
+curl -fsSL https://delightroom.github.io/ctx/install.sh | \
   sh -s -- --version v0.1.0
 
-curl -fsSL https://ctx.droom.dev/install.sh | \
+curl -fsSL https://delightroom.github.io/ctx/install.sh | \
   sh -s -- --install-dir "$HOME/bin"
 ```
 

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const installerURL = "https://ctx.droom.dev/install.sh"
+const installerURL = "https://delightroom.github.io/ctx/install.sh"
 
 func update(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)

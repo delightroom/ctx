@@ -3,7 +3,7 @@
 The canonical installation flow is:
 
 ```bash
-curl -fsSL https://ctx.droom.dev/install.sh | sh
+curl -fsSL https://delightroom.github.io/ctx/install.sh | sh
 ```
 
 The public endpoint is deliberately stable. Release storage and source hosting
@@ -36,9 +36,10 @@ The installer:
 
 ## Installer hosting
 
-`https://ctx.droom.dev/install.sh` must return the repository's `install.sh`
-verbatim over HTTPS without authentication. Cache invalidation should happen
-on every change to `main`.
+The Pages workflow publishes the repository's `install.sh` verbatim at
+`https://delightroom.github.io/ctx/install.sh` over HTTPS without
+authentication. It deploys whenever the script or site configuration changes
+on `main`.
 
 The script resolves release metadata and artifacts from the public
 `delightroom/ctx` GitHub Releases.
