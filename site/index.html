@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ctx</title>
+    <meta
+      name="description"
+      content="Tailnet-native context sharing for Claude Code and Codex."
+    >
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        place-items: center;
+      }
+      main {
+        width: min(42rem, calc(100% - 3rem));
+      }
+      h1 {
+        margin-bottom: 0.5rem;
+      }
+      p {
+        line-height: 1.6;
+      }
+      pre {
+        overflow-x: auto;
+        padding: 1rem;
+        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        border-radius: 0.5rem;
+      }
+      a {
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>ctx</h1>
+      <p>Tailnet-native context sharing for Claude Code and Codex.</p>
+      <pre><code>curl -fsSL https://ctx.droom.dev/install.sh | sh</code></pre>
+      <p><a href="https://github.com/delightroom/ctx">Source and documentation</a></p>
+    </main>
+  </body>
+</html>
