@@ -7,8 +7,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
+	ctxclient "github.com/delightroom/ctx/internal/client"
+	"github.com/delightroom/ctx/internal/preview"
+	"github.com/delightroom/ctx/internal/protocol"
 	"github.com/delightroom/ctx/internal/source"
 	"github.com/delightroom/ctx/internal/tailnet"
 	ctxtui "github.com/delightroom/ctx/internal/tui"
@@ -39,6 +43,9 @@ Usage:
 The dashboard discovers local Claude Code and Codex sessions plus ctx feeds
 reachable over the tailnet. Selecting an action closes the dashboard before
 running the corresponding host, tail, or continue command.
+
+Resting on a row loads a deterministic, redacted session peek without calling
+an LLM. Set CTX_NO_ANIMATION=1 to disable the opening animation.
 
 Keys:
   Tab / Shift+Tab     Change focused panel
@@ -77,9 +84,10 @@ func runTUIWith(dependencies tuiDependencies, stdin io.Reader, stdout, stderr io
 		return err
 	}
 	result, err := dependencies.runProgram(ctxtui.Config{
-		Context: context.Background(),
-		Version: Version,
-		Loader:  &cliTUILoader{cwd: cwd},
+		Context:   context.Background(),
+		Version:   Version,
+		Loader:    &cliTUILoader{cwd: cwd},
+		ShowIntro: animationsEnabled(),
 	}, stdin, stdout)
 	if err != nil {
 		return fmt.Errorf("run TUI: %w", err)
@@ -107,7 +115,12 @@ type cliTUILoader struct {
 	cwd         string
 	statusGroup singleflight.Group
 	statusRead  func(context.Context) (tailnet.Status, error)
+	previewMu   sync.Mutex
+	previews    map[string]preview.Summary
+	previewKeys []string
 }
+
+const maxPreviewCacheEntries = 64
 
 func (loader *cliTUILoader) LoadStatus(ctx context.Context) (ctxtui.Status, error) {
 	status := ctxtui.Status{Agents: installedAgents()}
@@ -196,7 +209,117 @@ func (loader *cliTUILoader) LoadShared(ctx context.Context) ([]ctxtui.SharedCont
 			Project:     feed.Project,
 			Revision:    feed.Revision,
 			UpdatedAt:   feed.UpdatedAt,
+			BaseURL:     feed.BaseURL,
 		})
 	}
 	return contexts, nil
+}
+
+func (loader *cliTUILoader) LoadLocalPreview(
+	ctx context.Context,
+	session ctxtui.LocalSession,
+) (preview.Summary, error) {
+	info, err := os.Stat(session.Path)
+	if err != nil {
+		return preview.Summary{}, err
+	}
+	key := fmt.Sprintf(
+		"local:%s:%d:%d",
+		session.Path,
+		info.ModTime().UnixNano(),
+		info.Size(),
+	)
+	return loader.loadPreview(ctx, key, func() (preview.Summary, error) {
+		file, err := source.Open(session.Path)
+		if err != nil {
+			return preview.Summary{}, err
+		}
+		return file.PreviewContext(ctx)
+	})
+}
+
+func (loader *cliTUILoader) LoadSharedPreview(
+	ctx context.Context,
+	shared ctxtui.SharedContext,
+) (preview.Summary, error) {
+	key := "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" + shared.Revision
+	return loader.loadPreview(ctx, key, func() (preview.Summary, error) {
+		if shared.BaseURL == "" {
+			return preview.Summary{}, errors.New("shared context origin is unavailable; press r to refresh")
+		}
+		if shared.Revision == "" {
+			return preview.Summary{}, errors.New("shared context revision is unavailable; press r to refresh")
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		digest, revision, err := ctxclient.New(5*time.Second).Digest(
+			requestCtx,
+			shared.BaseURL,
+			shared.Name,
+			"",
+		)
+		if err != nil {
+			return preview.Summary{}, err
+		}
+		if digest.Manifest.ProtocolVersion != protocol.Version {
+			return preview.Summary{}, fmt.Errorf(
+				"unsupported protocol version %q",
+				digest.Manifest.ProtocolVersion,
+			)
+		}
+		if digest.Manifest.Name != shared.Name || digest.Manifest.Node != shared.Node {
+			return preview.Summary{}, errors.New("shared context identity changed; press r to refresh")
+		}
+		if revision == "" || digest.Manifest.Revision != revision {
+			return preview.Summary{}, errors.New("shared context returned an inconsistent revision")
+		}
+		if revision != shared.Revision {
+			return preview.Summary{}, errors.New("shared context changed since discovery; press r to refresh")
+		}
+		return preview.Build(digest), nil
+	})
+}
+
+func (loader *cliTUILoader) loadPreview(
+	ctx context.Context,
+	key string,
+	load func() (preview.Summary, error),
+) (preview.Summary, error) {
+	if err := ctx.Err(); err != nil {
+		return preview.Summary{}, err
+	}
+
+	loader.previewMu.Lock()
+	cached, ok := loader.previews[key]
+	loader.previewMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	result, err := load()
+	if err != nil {
+		return preview.Summary{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return preview.Summary{}, err
+	}
+	loader.previewMu.Lock()
+	if loader.previews == nil {
+		loader.previews = make(map[string]preview.Summary)
+	}
+	if _, exists := loader.previews[key]; !exists {
+		if len(loader.previewKeys) == maxPreviewCacheEntries {
+			delete(loader.previews, loader.previewKeys[0])
+			copy(loader.previewKeys, loader.previewKeys[1:])
+			loader.previewKeys = loader.previewKeys[:len(loader.previewKeys)-1]
+		}
+		loader.previewKeys = append(loader.previewKeys, key)
+	}
+	loader.previews[key] = result
+	loader.previewMu.Unlock()
+	return result, nil
+}
+
+func animationsEnabled() bool {
+	return os.Getenv("CTX_NO_ANIMATION") == "" && os.Getenv("TERM") != "dumb"
 }

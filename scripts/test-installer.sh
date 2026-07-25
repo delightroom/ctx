@@ -45,13 +45,26 @@ CTX_RELEASE_ROOT="file://${test_root}/releases" \
   sh "${repository_root}/install.sh" \
   --version "$tag" \
   --install-dir "$install_directory" \
-  --no-modify-path
+  --no-modify-path >"${test_root}/first-install.log"
 
 installed_output=$("${install_directory}/ctx")
 [ "$installed_output" = "ctx test release ${version}" ]
+[ "$(grep -c "context travels better together" "${test_root}/first-install.log")" -eq 1 ]
 [ "$(sed -n '1p' "${data_directory}/ctx/install-method")" = "standalone" ]
 canonical_install_directory=$(cd "$install_directory" && pwd)
 [ "$(sed -n '2p' "${data_directory}/ctx/install-method")" = "${canonical_install_directory}/ctx" ]
+
+HOME="$home_directory" \
+XDG_DATA_HOME="$data_directory" \
+CTX_RELEASE_ROOT="file://${test_root}/releases" \
+  sh "${repository_root}/install.sh" \
+  --version "$tag" \
+  --install-dir "$install_directory" \
+  --no-modify-path >"${test_root}/repeat-install.log"
+if grep -q "context travels better together" "${test_root}/repeat-install.log"; then
+  printf '%s\n' "installer replayed first-install art during an update" >&2
+  exit 1
+fi
 
 printf '%064d  %s\n' 0 "$archive" >"${release_directory}/checksums.txt"
 if HOME="$home_directory" \

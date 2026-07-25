@@ -15,7 +15,8 @@ ctx
 
 The installer detects the operating system and architecture, downloads the
 matching release, verifies its SHA-256 checksum, and installs `ctx` into
-`~/.local/bin`. It does not require `sudo`.
+`~/.local/bin`. It does not require `sudo`. A first standalone install ends
+with the dog-and-cat string-phone welcome; updates do not replay it.
 
 Pin a release or choose an installation directory when needed:
 
@@ -35,16 +36,23 @@ Run `ctx` without arguments in a terminal to open the context dashboard.
 ```text
 $ ctx
 
-ctx 0.3.0  |  TAILNET dev-laptop  |  AGENTS Claude Code + Codex
+ctx dev  |  TAILNET dev-laptop  |  AGENTS Claude Code + Codex
 ╭─────────────────────────────────────╮╭───────────────────────────────────╮
 │ > LOCAL SESSIONS  WORKSPACE  2      ││   SHARED CONTEXTS  2             │
 │ > Claude  payments           14s ago││   review-host/release-review Codex│
 │   Codex   ctx                 2m ago││   api-host/payment-debug   Claude│
 ╰─────────────────────────────────────╯╰───────────────────────────────────╯
 ╭─────────────────────────────────────────────────────────────────────────╮
-│ SELECTION                                                               │
-│ Provider Claude  Project payments  Updated 14s ago                       │
-│ Action: Enter or h to host this session                                 │
+│ SELECTION  LOCAL                                                        │
+│ Claude · payments · 14s ago · session claude-1                          │
+│ Enter / h  Host this session                                            │
+│ SESSION PEEK                                                            │
+│ Current   Make the retry path observable without changing its behavior. │
+│ Activity  42 events · 6 you · 8 agent · 12 tool calls · Bash, Read      │
+│ RECENT TURNS                                                            │
+│ Agent     The focused tests now pass.                                   │
+│ Workspace /work/payments                                                │
+│ Source    ~/.claude/projects/.../claude-1.jsonl                         │
 ╰─────────────────────────────────────────────────────────────────────────╯
 tab focus  ↑↓ move  enter actions  / filter  a all  r refresh  ? help  q quit
 ```
@@ -55,11 +63,20 @@ panel discovers shared contexts reachable over Tailscale. Both inventories
 load independently, so local browsing remains available if the tailnet is
 offline or a peer does not respond.
 
-The dashboard shows metadata only—provider, project, locator, revision, and
-timestamps. It does not render conversation content. Press `Enter` for the
-available actions, or use `h`, `t`, `f`, and `c` to host, tail, follow, or
-continue directly. The dashboard exits before handing control to the regular
-command, keeping those long-running and interactive flows predictable.
+Rest on a session to populate `SESSION PEEK` with its current request, activity
+counts, recently used tool names, and up to four recent human/agent turns. The
+summary is deterministic and extractive: it uses the same normalized event
+parser and display redaction rules as `ctx host`, and never calls a local or
+cloud LLM. Local previews stream into fixed-size summary state; shared previews
+fetch a size-limited digest from the selected provider. Selection changes are
+debounced and obsolete reads are cancelled. Moving back to a local row checks
+the source file again; press `r` to refresh the inventories and the currently
+selected preview.
+
+Press `Enter` for the available actions, or use `h`, `t`, `f`, and `c` to host,
+tail, follow, or continue directly. The dashboard exits before handing control
+to the regular command, keeping those long-running and interactive flows
+predictable.
 
 The dashboard requires at least a `60x18` terminal and switches from
 side-by-side panels to a stacked layout below 100 columns. Press `?` inside it,
@@ -67,6 +84,9 @@ or run `ctx tui --help`, for the complete key reference.
 
 Bare `ctx` opens the dashboard only in an interactive terminal. Scripts and CI
 receive ordinary help output and should continue to use explicit commands.
+Its brief string-phone intro is skippable with any key. Set
+`CTX_NO_ANIMATION=1` to keep the final first-install artwork but disable motion
+in both the installer and dashboard.
 
 ## Commands
 
@@ -262,10 +282,36 @@ make check
 go test -race ./...
 ```
 
-To install a development build from a checkout:
+Run the development TUI without replacing an installed release:
 
 ```bash
-make install
+make run-dev
+```
+
+This builds `ctx` into `~/.local/share/ctx/dev/bin` and prepends that directory
+to `PATH` for the spawned process only. For repeated explicit commands:
+
+```bash
+make install-dev
+PATH="$HOME/.local/share/ctx/dev/bin:$PATH" ctx version
+PATH="$HOME/.local/share/ctx/dev/bin:$PATH" ctx doctor
+```
+
+Remove only the development binary:
+
+```bash
+make uninstall-dev
+hash -r
+```
+
+An existing Homebrew or standalone `ctx` is never overwritten. To replace the
+development build with the latest standalone release:
+
+```bash
+make uninstall-dev
+curl -fsSL https://delightroom.github.io/ctx/install.sh | sh
+hash -r
+"$HOME/.local/bin/ctx" version
 ```
 
 Release tags are built for macOS and Linux on amd64 and arm64 using GoReleaser.

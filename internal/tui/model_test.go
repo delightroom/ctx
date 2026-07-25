@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/delightroom/ctx/internal/preview"
 )
 
 func TestRenderWideAndStackedLayouts(t *testing.T) {
@@ -50,13 +51,71 @@ func TestRenderSmallTerminalMessage(t *testing.T) {
 	}
 }
 
+func TestRenderSessionPeek(t *testing.T) {
+	model := readyModel()
+	model.height = 36
+	model.previewKey = "local:/sessions/claude.jsonl"
+	model.preview = preview.Summary{
+		CurrentRequest: "Improve the session details with a concise preview.",
+		EventCount:     42,
+		UserTurns:      6,
+		AgentTurns:     8,
+		ToolCalls:      12,
+		Tools:          []string{"Bash", "Edit", "Read"},
+		Recent: []preview.Turn{
+			{Role: "You", Text: "Can we make the metadata useful?"},
+			{Role: "Agent", Text: "I am adding an extractive summary."},
+		},
+	}
+
+	rendered := stripANSI(model.render())
+	for _, want := range []string{
+		"SESSION PEEK",
+		"Current   Improve the session details",
+		"42 events · 6 you · 8 agent · 12 tool calls · Bash, Edit, Read",
+		"RECENT TURNS",
+		"You       Can we make the metadata useful?",
+		"Agent     I am adding an extractive summary.",
+		"Workspace /work/payments",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered preview lacks %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestIntroAnimatesAndCanBeSkipped(t *testing.T) {
+	model := readyModel()
+	model.showIntro = true
+	rendered := stripANSI(model.render())
+	if !strings.Contains(rendered, "context travels better together") ||
+		!strings.Contains(rendered, "/\\_/\\") {
+		t.Fatalf("intro art was not rendered:\n%s", rendered)
+	}
+	if lipgloss.Width(model.render()) != model.width ||
+		lipgloss.Height(model.render()) != model.height {
+		t.Fatalf("intro dimensions = %dx%d", lipgloss.Width(model.render()), lipgloss.Height(model.render()))
+	}
+
+	if command, handled := model.handleKey("x"); !handled || command != nil || model.showIntro {
+		t.Fatalf("intro was not skipped: handled=%v command=%v show=%v", handled, command, model.showIntro)
+	}
+
+	model.showIntro = true
+	model.introFrame = introFrameCount - 1
+	model.Update(introTickMsg{})
+	if model.showIntro {
+		t.Fatal("intro did not finish after its last frame")
+	}
+}
+
 func TestHelpFitsMinimumTerminal(t *testing.T) {
 	model := readyModel()
 	model.width = 60
 	model.height = 18
 	baseLines := strings.Split(stripANSI(model.render()), "\n")
 	if !strings.Contains(baseLines[len(baseLines)-1], "q quit") {
-		t.Fatalf("minimum-width footer = %q", baseLines[len(baseLines)-1])
+		t.Fatalf("minimum-width footer = %q\n%s", baseLines[len(baseLines)-1], strings.Join(baseLines, "\n"))
 	}
 	model.showHelp = true
 	rendered := model.render()
@@ -172,6 +231,35 @@ func TestStaleLoaderMessagesAreIgnored(t *testing.T) {
 	}
 }
 
+func TestChangingSelectionCancelsDebouncedPreview(t *testing.T) {
+	model := readyModel()
+	model.previewKey = ""
+	model.statusLoading = true
+	firstCommand := model.schedulePreview()
+	firstMessage, ok := firstCommand().(previewDebounceMsg)
+	if !ok {
+		t.Fatalf("preview command returned %T", firstCommand())
+	}
+
+	model.moveSelection(1)
+	if next := model.schedulePreview(); next == nil {
+		t.Fatal("new selection did not schedule another preview")
+	}
+	select {
+	case <-firstMessage.ctx.Done():
+	default:
+		t.Fatal("previous preview context was not cancelled")
+	}
+
+	model.Update(previewLoadedMsg{
+		sequence: firstMessage.sequence,
+		summary:  preview.Summary{CurrentRequest: "stale"},
+	})
+	if model.preview.CurrentRequest == "stale" {
+		t.Fatal("stale preview replaced the new selection")
+	}
+}
+
 func TestLoaderCommandsUseConfiguredScope(t *testing.T) {
 	loader := &fakeLoader{}
 	model := NewModel(Config{Context: context.Background(), Loader: loader})
@@ -239,6 +327,14 @@ func (loader *fakeLoader) LoadLocal(_ context.Context, all bool) ([]LocalSession
 
 func (loader *fakeLoader) LoadShared(context.Context) ([]SharedContext, error) {
 	return nil, nil
+}
+
+func (loader *fakeLoader) LoadLocalPreview(context.Context, LocalSession) (preview.Summary, error) {
+	return preview.Summary{}, nil
+}
+
+func (loader *fakeLoader) LoadSharedPreview(context.Context, SharedContext) (preview.Summary, error) {
+	return preview.Summary{}, nil
 }
 
 func readyModel() *Model {

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,35 +17,61 @@ import (
 
 var ErrNotModified = errors.New("not modified")
 
+const (
+	maxListResponseBytes     = 1024 * 1024
+	maxManifestResponseBytes = 64 * 1024
+	maxDigestResponseBytes   = 256 * 1024
+	maxDigestEvents          = 4096
+)
+
 type Client struct {
 	HTTP *http.Client
 }
 
 func New(timeout time.Duration) *Client {
-	return &Client{HTTP: &http.Client{Timeout: timeout}}
+	return &Client{HTTP: &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
 }
 
 func (c *Client) List(ctx context.Context, baseURL string) ([]protocol.FeedSummary, error) {
 	var feeds []protocol.FeedSummary
-	_, err := c.get(ctx, strings.TrimRight(baseURL, "/")+"/v1/feeds", "", &feeds)
+	_, err := c.get(
+		ctx,
+		strings.TrimRight(baseURL, "/")+"/v1/feeds",
+		"",
+		maxListResponseBytes,
+		&feeds,
+	)
 	return feeds, err
 }
 
 func (c *Client) Manifest(ctx context.Context, baseURL, feed string) (protocol.Manifest, error) {
 	var manifest protocol.Manifest
 	path := fmt.Sprintf("%s/v1/feeds/%s/manifest", strings.TrimRight(baseURL, "/"), url.PathEscape(feed))
-	_, err := c.get(ctx, path, "", &manifest)
+	_, err := c.get(ctx, path, "", maxManifestResponseBytes, &manifest)
 	return manifest, err
 }
 
 func (c *Client) Digest(ctx context.Context, baseURL, feed, revision string) (protocol.Digest, string, error) {
 	var digest protocol.Digest
 	path := fmt.Sprintf("%s/v1/feeds/%s/digest", strings.TrimRight(baseURL, "/"), url.PathEscape(feed))
-	etag, err := c.get(ctx, path, revision, &digest)
+	etag, err := c.get(ctx, path, revision, maxDigestResponseBytes, &digest)
+	if err == nil && len(digest.Events) > maxDigestEvents {
+		err = fmt.Errorf("digest has %d events; limit is %d", len(digest.Events), maxDigestEvents)
+	}
 	return digest, strings.Trim(etag, `"`), err
 }
 
-func (c *Client) get(ctx context.Context, endpoint, revision string, target any) (string, error) {
+func (c *Client) get(
+	ctx context.Context,
+	endpoint, revision string,
+	maxBytes int64,
+	target any,
+) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -64,8 +91,22 @@ func (c *Client) get(ctx context.Context, endpoint, revision string, target any)
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
 		return "", fmt.Errorf("%s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
-	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+	if response.ContentLength > maxBytes {
+		return "", fmt.Errorf("response is %d bytes; limit is %d", response.ContentLength, maxBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
 		return "", err
+	}
+	if int64(len(body)) > maxBytes {
+		return "", fmt.Errorf("response exceeds %d-byte limit", maxBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(target); err != nil {
+		return "", err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return "", errors.New("response contains trailing JSON data")
 	}
 	return response.Header.Get("ETag"), nil
 }

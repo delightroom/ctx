@@ -26,6 +26,41 @@ fail() {
   exit 1
 }
 
+print_ctx_art() {
+  dog_says=$1
+  cat_says=$2
+  signal=$3
+  printf '       %-9s                    %9s\n' "$dog_says" "$cat_says"
+  printf '%s\n' '   / \__                            /\_/\'
+  printf '%s\n' '  (    @\___                       ( o.o )'
+  printf '  /         O=[_]%s[_]=< > ^ <\n' "$signal"
+  printf '%s\n' ' /   (_____/                       /   \'
+  printf '%s\n' '/_____/   U                       (_____)'
+  printf '\n'
+  printf '%s\n' '             ctx  context travels better together'
+}
+
+show_first_install_art() {
+  if [ -t 1 ] &&
+    [ "${TERM:-dumb}" != "dumb" ] &&
+    [ -z "${CTX_NO_ANIMATION:-}" ] &&
+    sleep 0.01 2>/dev/null; then
+    print_ctx_art "woof?" "..." "o---------------"
+    sleep 0.09 2>/dev/null || true
+    printf '\033[8A'
+    print_ctx_art "woof!" "..." "----o-----------"
+    sleep 0.09 2>/dev/null || true
+    printf '\033[8A'
+    print_ctx_art "woof!" "..." "--------o-------"
+    sleep 0.09 2>/dev/null || true
+    printf '\033[8A'
+    print_ctx_art "woof!" "meow!" "------------o---"
+    sleep 0.09 2>/dev/null || true
+    printf '\033[8A'
+  fi
+  print_ctx_art "connected" "connected" "-------o--------"
+}
+
 download() {
   source_url=$1
   destination=$2
@@ -189,10 +224,18 @@ printf '✓ Installed to %s\n' "$install_path"
 data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
 marker_directory="${data_home}/ctx"
 mkdir -p "$marker_directory"
+first_install=1
+if [ -f "${marker_directory}/install-method" ]; then
+  first_install=0
+fi
 printf 'standalone\n%s\n' "$install_path" >"${marker_directory}/install-method"
 
 append_path "$canonical_install_dir"
 
+if [ "$first_install" -eq 1 ]; then
+  printf '\n'
+  show_first_install_art
+fi
 printf '\n%s\n' "ctx is ready."
 case ":${PATH:-}:" in
   *":${canonical_install_dir}:"*) printf '%s\n' "Run: ctx" ;;

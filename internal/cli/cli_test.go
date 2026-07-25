@@ -3,8 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/delightroom/ctx/internal/preview"
 	"github.com/delightroom/ctx/internal/protocol"
 	"github.com/delightroom/ctx/internal/tailnet"
 	ctxtui "github.com/delightroom/ctx/internal/tui"
@@ -179,6 +183,147 @@ func TestTUILoaderHonorsCancelledContext(t *testing.T) {
 	}
 }
 
+func TestTUILoaderBuildsAndCachesLocalPreview(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	initial := strings.Join([]string{
+		`{"type":"user","sessionId":"claude-1","cwd":"/work/ctx","message":{"role":"user","content":"Improve the session peek"}}`,
+		`{"type":"assistant","sessionId":"claude-1","cwd":"/work/ctx","message":{"role":"assistant","content":"I will inspect secret=very-sensitive-value"}}`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(initial+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := ctxtui.LocalSession{Path: path, ModifiedAt: time.Now()}
+	loader := &cliTUILoader{}
+
+	first, err := loader.LoadLocalPreview(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CurrentRequest != "Improve the session peek" ||
+		len(first.Recent) != 2 ||
+		strings.Contains(first.Recent[1].Text, "very-sensitive-value") {
+		t.Fatalf("preview = %+v", first)
+	}
+
+	replacement := `{"type":"user","sessionId":"claude-1","cwd":"/work/ctx","message":{"role":"user","content":"This should require a new inventory revision"}}`
+	if err := os.WriteFile(path, []byte(replacement+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := loader.LoadLocalPreview(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.CurrentRequest == first.CurrentRequest ||
+		second.CurrentRequest != "This should require a new inventory revision" {
+		t.Fatalf("stale preview after source changed: first=%q second=%q",
+			first.CurrentRequest, second.CurrentRequest)
+	}
+}
+
+func TestTUILoaderLoadsSharedPreviewFromDiscoveredOrigin(t *testing.T) {
+	const revision = "abc123"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/feeds/payments/digest" {
+			http.NotFound(response, request)
+			return
+		}
+		response.Header().Set("ETag", `"`+revision+`"`)
+		_ = json.NewEncoder(response).Encode(protocol.Digest{
+			Manifest: protocol.Manifest{
+				ProtocolVersion: protocol.Version,
+				Name:            "payments",
+				Node:            "provider",
+				Revision:        revision,
+			},
+			Events: []protocol.Event{{
+				Role: "user",
+				Kind: "message",
+				Text: "Review the payment retry",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	loader := &cliTUILoader{
+		statusRead: func(context.Context) (tailnet.Status, error) {
+			t.Fatal("shared preview reran tailscale status")
+			return tailnet.Status{}, nil
+		},
+	}
+	summary, err := loader.LoadSharedPreview(context.Background(), ctxtui.SharedContext{
+		Name:     "payments",
+		Node:     "provider",
+		Revision: revision,
+		BaseURL:  server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentRequest != "Review the payment retry" {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestTUILoaderRejectsChangedSharedPreview(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("ETag", `"new-revision"`)
+		_ = json.NewEncoder(response).Encode(protocol.Digest{
+			Manifest: protocol.Manifest{
+				ProtocolVersion: protocol.Version,
+				Name:            "payments",
+				Node:            "provider",
+				Revision:        "new-revision",
+			},
+		})
+	}))
+	defer server.Close()
+
+	_, err := (&cliTUILoader{}).LoadSharedPreview(
+		context.Background(),
+		ctxtui.SharedContext{
+			Name:     "payments",
+			Node:     "provider",
+			Revision: "discovered-revision",
+			BaseURL:  server.URL,
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "changed since discovery") {
+		t.Fatalf("LoadSharedPreview error = %v", err)
+	}
+}
+
+func TestTUILoaderBoundsPreviewCache(t *testing.T) {
+	loader := &cliTUILoader{}
+	for index := range maxPreviewCacheEntries + 10 {
+		key := strconv.Itoa(index)
+		_, err := loader.loadPreview(context.Background(), key, func() (preview.Summary, error) {
+			return preview.Summary{CurrentRequest: key}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(loader.previews) != maxPreviewCacheEntries ||
+		len(loader.previewKeys) != maxPreviewCacheEntries {
+		t.Fatalf("cache sizes = %d/%d", len(loader.previews), len(loader.previewKeys))
+	}
+	if _, exists := loader.previews["0"]; exists {
+		t.Fatal("oldest preview was not evicted")
+	}
+}
+
+func TestAnimationsEnabledCanBeDisabled(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("CTX_NO_ANIMATION", "")
+	if !animationsEnabled() {
+		t.Fatal("animation unexpectedly disabled")
+	}
+	t.Setenv("CTX_NO_ANIMATION", "1")
+	if animationsEnabled() {
+		t.Fatal("CTX_NO_ANIMATION did not disable animation")
+	}
+}
+
 func TestTUILoaderCoalescesConcurrentStatusReads(t *testing.T) {
 	var calls atomic.Int32
 	started := make(chan struct{}, 2)
@@ -282,6 +427,11 @@ func TestFeedDiscoveryBoundsConcurrency(t *testing.T) {
 	case feeds := <-done:
 		if len(feeds) != len(bases) {
 			t.Fatalf("discovered feeds = %d, want %d", len(feeds), len(bases))
+		}
+		for _, feed := range feeds {
+			if feed.BaseURL != feed.Name {
+				t.Fatalf("feed origin = %q, want %q", feed.BaseURL, feed.Name)
+			}
 		}
 	case <-time.After(time.Second):
 		t.Fatal("bounded peer discovery did not finish")
