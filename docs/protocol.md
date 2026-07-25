@@ -37,8 +37,11 @@ client registration.
 
 ## Digest limits
 
-Individual event text is limited to 8 KiB and a digest to approximately 96
-KiB. The first events and newest events are preserved when the limit is
-reached. A synthetic omission event records that middle history was removed.
+Individual event text is limited to 8 KiB and serialized events in a digest to
+approximately 96 KiB. The first events, up to eight most recent human/agent
+messages, and as many newest events as fit are preserved when the limit is
+reached. One synthetic omission event records how much history was removed.
+Prioritizing conversational turns keeps the active request legible even when
+large tool traffic follows it.
 
 Known secret shapes are redacted before revision hashing and serving.

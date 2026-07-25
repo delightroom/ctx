@@ -3,6 +3,7 @@ package source
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,13 +18,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/delightroom/ctx/internal/preview"
 	"github.com/delightroom/ctx/internal/protocol"
 	"github.com/delightroom/ctx/internal/redact"
 )
 
 const (
-	maxEventBytes  = 8 * 1024
-	maxDigestBytes = 96 * 1024
+	maxEventBytes           = 8 * 1024
+	maxDigestBytes          = 96 * 1024
+	recentConversationLimit = 8
 )
 
 var errUnrecognizedSession = errors.New("unrecognized session")
@@ -147,6 +150,14 @@ func listSessions(cwd string, all bool) ([]Session, error) {
 func (f *File) Path() string { return f.path }
 
 func (f *File) Snapshot() (protocol.Digest, error) {
+	return f.SnapshotContext(context.Background())
+}
+
+// SnapshotContext is the cancellable form for callers that may stop a long parse.
+func (f *File) SnapshotContext(ctx context.Context) (protocol.Digest, error) {
+	if err := contextError(ctx); err != nil {
+		return protocol.Digest{}, err
+	}
 	handle, err := os.Open(f.path)
 	if err != nil {
 		return protocol.Digest{}, err
@@ -156,9 +167,9 @@ func (f *File) Snapshot() (protocol.Digest, error) {
 	var digest protocol.Digest
 	switch f.agent {
 	case "claude-code":
-		digest, err = parseClaude(handle)
+		digest, err = parseClaude(ctx, handle)
 	case "codex-cli":
-		digest, err = parseCodex(handle)
+		digest, err = parseCodex(ctx, handle)
 	default:
 		err = fmt.Errorf("unsupported source agent %q", f.agent)
 	}
@@ -173,12 +184,42 @@ func (f *File) Snapshot() (protocol.Digest, error) {
 	}
 
 	for index := range digest.Events {
+		if err := contextError(ctx); err != nil {
+			return protocol.Digest{}, err
+		}
 		digest.Events[index].Text = redact.String(truncate(digest.Events[index].Text, maxEventBytes))
 	}
 	digest.Events, digest.Manifest.Truncated = limitEvents(digest.Events, maxDigestBytes)
 	digest.Manifest.EventCount = len(digest.Events)
 	digest.Manifest.Revision = revision(digest)
 	return digest, nil
+}
+
+// PreviewContext extracts the small set of display fields in a streaming pass.
+// Unlike SnapshotContext, memory use does not grow with the session history.
+func (f *File) PreviewContext(ctx context.Context) (preview.Summary, error) {
+	if err := contextError(ctx); err != nil {
+		return preview.Summary{}, err
+	}
+	handle, err := os.Open(f.path)
+	if err != nil {
+		return preview.Summary{}, err
+	}
+	defer handle.Close()
+
+	var accumulator preview.Accumulator
+	switch f.agent {
+	case "claude-code":
+		_, err = scanClaude(ctx, handle, accumulator.Add)
+	case "codex-cli":
+		_, err = scanCodex(ctx, handle, accumulator.Add)
+	default:
+		err = fmt.Errorf("unsupported source agent %q", f.agent)
+	}
+	if err != nil {
+		return preview.Summary{}, err
+	}
+	return accumulator.Summary(false), nil
 }
 
 func Detect(path string) (string, error) {
@@ -418,12 +459,28 @@ func codexSessionCWD(path, cwd string) (bool, error) {
 	return false, scanner.Err()
 }
 
-func parseClaude(reader io.Reader) (protocol.Digest, error) {
+func parseClaude(ctx context.Context, reader io.Reader) (protocol.Digest, error) {
 	var digest protocol.Digest
+	manifest, err := scanClaude(ctx, reader, func(event protocol.Event) {
+		digest.Events = append(digest.Events, event)
+	})
+	digest.Manifest = manifest
+	return digest, err
+}
+
+func scanClaude(
+	ctx context.Context,
+	reader io.Reader,
+	consume func(protocol.Event),
+) (protocol.Manifest, error) {
+	var manifest protocol.Manifest
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	line := 0
 	for scanner.Scan() {
+		if err := contextError(ctx); err != nil {
+			return protocol.Manifest{}, err
+		}
 		line++
 		var envelope struct {
 			Type      string          `json:"type"`
@@ -436,10 +493,10 @@ func parseClaude(reader io.Reader) (protocol.Digest, error) {
 			continue
 		}
 		if envelope.SessionID != "" {
-			digest.Manifest.SessionID = envelope.SessionID
+			manifest.SessionID = envelope.SessionID
 		}
 		if envelope.CWD != "" {
-			digest.Manifest.HostCWD = envelope.CWD
+			manifest.HostCWD = envelope.CWD
 		}
 		if envelope.Type != "user" && envelope.Type != "assistant" {
 			continue
@@ -451,9 +508,11 @@ func parseClaude(reader io.Reader) (protocol.Digest, error) {
 		if json.Unmarshal(envelope.Message, &message) != nil {
 			continue
 		}
-		digest.Events = append(digest.Events, claudeContent(message.Role, envelope.Timestamp, line, message.Content)...)
+		for _, event := range claudeContent(message.Role, envelope.Timestamp, line, message.Content) {
+			consume(event)
+		}
 	}
-	return digest, scanner.Err()
+	return manifest, scanner.Err()
 }
 
 func claudeContent(role string, timestamp time.Time, line int, content json.RawMessage) []protocol.Event {
@@ -495,12 +554,28 @@ func claudeContent(role string, timestamp time.Time, line int, content json.RawM
 	return events
 }
 
-func parseCodex(reader io.Reader) (protocol.Digest, error) {
+func parseCodex(ctx context.Context, reader io.Reader) (protocol.Digest, error) {
 	var digest protocol.Digest
+	manifest, err := scanCodex(ctx, reader, func(event protocol.Event) {
+		digest.Events = append(digest.Events, event)
+	})
+	digest.Manifest = manifest
+	return digest, err
+}
+
+func scanCodex(
+	ctx context.Context,
+	reader io.Reader,
+	consume func(protocol.Event),
+) (protocol.Manifest, error) {
+	var manifest protocol.Manifest
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	line := 0
 	for scanner.Scan() {
+		if err := contextError(ctx); err != nil {
+			return protocol.Manifest{}, err
+		}
 		line++
 		var envelope struct {
 			Timestamp time.Time       `json:"timestamp"`
@@ -516,8 +591,8 @@ func parseCodex(reader io.Reader) (protocol.Digest, error) {
 				CWD string `json:"cwd"`
 			}
 			if json.Unmarshal(envelope.Payload, &metadata) == nil {
-				digest.Manifest.SessionID = metadata.ID
-				digest.Manifest.HostCWD = metadata.CWD
+				manifest.SessionID = metadata.ID
+				manifest.HostCWD = metadata.CWD
 			}
 			continue
 		}
@@ -543,27 +618,27 @@ func parseCodex(reader io.Reader) (protocol.Digest, error) {
 					text = stringValue(block["output_text"])
 				}
 				if text != "" {
-					digest.Events = append(digest.Events, protocol.Event{
+					consume(protocol.Event{
 						ID: fmt.Sprintf("%d-%d", line, index), Timestamp: envelope.Timestamp,
 						Role: role, Kind: "message", Text: text,
 					})
 				}
 			}
 		case "function_call", "custom_tool_call":
-			digest.Events = append(digest.Events, protocol.Event{
+			consume(protocol.Event{
 				ID: fmt.Sprintf("%d-0", line), Timestamp: envelope.Timestamp, Role: "assistant",
 				Kind: "tool_call", ToolName: stringValue(item["name"]),
 				ToolCallID: stringValue(item["call_id"]), Text: contentText(item["arguments"]),
 			})
 		case "function_call_output", "custom_tool_call_output":
-			digest.Events = append(digest.Events, protocol.Event{
+			consume(protocol.Event{
 				ID: fmt.Sprintf("%d-0", line), Timestamp: envelope.Timestamp, Role: "tool",
 				Kind: "tool_result", ToolCallID: stringValue(item["call_id"]),
 				Text: contentText(item["output"]),
 			})
 		}
 	}
-	return digest, scanner.Err()
+	return manifest, scanner.Err()
 }
 
 func stringValue(value any) string {
@@ -623,36 +698,86 @@ func truncate(value string, limit int) string {
 func limitEvents(events []protocol.Event, limit int) ([]protocol.Event, bool) {
 	size := 0
 	for _, event := range events {
-		size += len(event.Text)
+		size += eventBudgetCost(event)
 	}
 	if size <= limit {
 		return events, false
 	}
 
-	headCount := min(4, len(events))
-	result := append([]protocol.Event(nil), events[:headCount]...)
-	remaining := limit
-	for _, event := range result {
-		remaining -= len(event.Text)
-	}
-	var tail []protocol.Event
-	for index := len(events) - 1; index >= headCount; index-- {
-		if len(events[index].Text) > remaining {
-			break
+	markerCost := eventBudgetCost(omissionEvent(len(events)))
+	remaining := max(0, limit-markerCost)
+	selected := make([]bool, len(events))
+	selectEvent := func(index int) bool {
+		cost := eventBudgetCost(events[index])
+		if selected[index] || cost > remaining {
+			return false
 		}
-		tail = append(tail, events[index])
-		remaining -= len(events[index].Text)
+		selected[index] = true
+		remaining -= cost
+		return true
 	}
-	for left, right := 0, len(tail)-1; left < right; left, right = left+1, right-1 {
-		tail[left], tail[right] = tail[right], tail[left]
+
+	for index := 0; index < min(4, len(events)); index++ {
+		selectEvent(index)
 	}
-	omitted := len(events) - len(result) - len(tail)
-	result = append(result, protocol.Event{
-		ID: "omitted", Role: "system", Kind: "omission",
-		Text: fmt.Sprintf("[%d earlier events omitted to fit the context budget]", omitted),
-	})
-	result = append(result, tail...)
+
+	conversation := 0
+	for index := len(events) - 1; index >= 0 && conversation < recentConversationLimit; index-- {
+		event := events[index]
+		if event.Kind != "message" || event.Role != "user" && event.Role != "assistant" {
+			continue
+		}
+		if selectEvent(index) {
+			conversation++
+		}
+	}
+
+	for index := len(events) - 1; index >= 0; index-- {
+		selectEvent(index)
+	}
+
+	omitted := 0
+	for _, keep := range selected {
+		if !keep {
+			omitted++
+		}
+	}
+
+	result := make([]protocol.Event, 0, len(events)-omitted+1)
+	seenOmitted := false
+	markerAdded := false
+	for index, keep := range selected {
+		if !keep {
+			seenOmitted = true
+			continue
+		}
+		if seenOmitted && !markerAdded {
+			result = append(result, omissionEvent(omitted))
+			markerAdded = true
+		}
+		result = append(result, events[index])
+	}
+	if !markerAdded {
+		result = append(result, omissionEvent(omitted))
+	}
 	return result, true
+}
+
+func eventBudgetCost(event protocol.Event) int {
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return maxDigestBytes
+	}
+	return len(encoded) + 1
+}
+
+func omissionEvent(count int) protocol.Event {
+	return protocol.Event{
+		ID:   "omitted",
+		Role: "system",
+		Kind: "omission",
+		Text: fmt.Sprintf("[%d events omitted to fit the context budget]", count),
+	}
 }
 
 func revision(digest protocol.Digest) string {
@@ -667,4 +792,13 @@ func revision(digest protocol.Digest) string {
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+func contextError(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
 }

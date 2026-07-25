@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	sessionpreview "github.com/delightroom/ctx/internal/preview"
 )
 
 type ActionKind string
@@ -52,6 +53,7 @@ type SharedContext struct {
 	Project     string
 	Revision    string
 	UpdatedAt   time.Time
+	BaseURL     string
 }
 
 func (s SharedContext) Locator() string {
@@ -62,12 +64,15 @@ type Loader interface {
 	LoadStatus(context.Context) (Status, error)
 	LoadLocal(context.Context, bool) ([]LocalSession, error)
 	LoadShared(context.Context) ([]SharedContext, error)
+	LoadLocalPreview(context.Context, LocalSession) (sessionpreview.Summary, error)
+	LoadSharedPreview(context.Context, SharedContext) (sessionpreview.Summary, error)
 }
 
 type Config struct {
-	Context context.Context
-	Version string
-	Loader  Loader
+	Context   context.Context
+	Version   string
+	Loader    Loader
+	ShowIntro bool
 }
 
 type panel int
@@ -103,6 +108,26 @@ type sharedLoadedMsg struct {
 	err      error
 }
 
+type previewTarget struct {
+	key    string
+	local  *LocalSession
+	shared *SharedContext
+}
+
+type previewDebounceMsg struct {
+	sequence int
+	target   previewTarget
+	ctx      context.Context
+}
+
+type previewLoadedMsg struct {
+	sequence int
+	summary  sessionpreview.Summary
+	err      error
+}
+
+type introTickMsg struct{}
+
 type Model struct {
 	ctx     context.Context
 	loader  Loader
@@ -135,6 +160,13 @@ type Model struct {
 	sharedIndex   int
 	sharedFilter  string
 
+	preview        sessionpreview.Summary
+	previewKey     string
+	previewLoading bool
+	previewError   string
+	previewSeq     int
+	previewCancel  context.CancelFunc
+
 	filterInput    textinput.Model
 	filtering      bool
 	filterOriginal string
@@ -146,6 +178,9 @@ type Model struct {
 	actionIndex int
 	notice      string
 	result      Result
+
+	showIntro  bool
+	introFrame int
 }
 
 func NewModel(config Config) *Model {
@@ -176,6 +211,7 @@ func NewModel(config Config) *Model {
 		statusSeq:     1,
 		localSeq:      1,
 		sharedSeq:     1,
+		showIntro:     config.ShowIntro,
 	}
 	return model
 }
@@ -207,13 +243,17 @@ func Run(config Config, input io.Reader, output io.Writer) (Result, error) {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(
+	commands := []tea.Cmd{
 		tea.RequestBackgroundColor,
 		m.spinner.Tick,
 		m.loadStatus(m.statusSeq),
 		m.loadLocal(m.localSeq),
 		m.loadShared(m.sharedSeq),
-	)
+	}
+	if m.showIntro {
+		commands = append(commands, m.tickIntro())
+	}
+	return tea.Batch(commands...)
 }
 
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -240,6 +280,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.local = msg.sessions
 			m.localError = errorText(msg.err)
 			m.clampSelection()
+			commands = append(commands, m.schedulePreview())
 		}
 	case sharedLoadedMsg:
 		if msg.sequence == m.sharedSeq {
@@ -247,6 +288,26 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.shared = msg.contexts
 			m.sharedError = errorText(msg.err)
 			m.clampSelection()
+			commands = append(commands, m.schedulePreview())
+		}
+	case previewDebounceMsg:
+		if msg.sequence == m.previewSeq && msg.target.key == m.previewKey {
+			commands = append(commands, m.loadPreview(msg))
+		}
+	case previewLoadedMsg:
+		if msg.sequence == m.previewSeq {
+			m.previewLoading = false
+			m.preview = msg.summary
+			m.previewError = errorText(msg.err)
+		}
+	case introTickMsg:
+		if m.showIntro {
+			m.introFrame++
+			if m.introFrame >= introFrameCount {
+				m.showIntro = false
+			} else {
+				commands = append(commands, m.tickIntro())
+			}
 		}
 	case tea.KeyPressMsg:
 		if command, handled := m.handleKey(msg.String()); handled {
@@ -259,7 +320,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterInput = updated
 		m.setActiveFilter(updated.Value())
 		m.clampSelection()
-		commands = append(commands, command)
+		commands = append(commands, command, m.schedulePreview())
 	}
 
 	if m.anyLoading() {
@@ -280,8 +341,18 @@ func (m *Model) View() tea.View {
 
 func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 	if key == "ctrl+c" {
+		m.cancelPreviewLoad()
 		m.result = Result{}
 		return tea.Quit, true
+	}
+	if m.showIntro {
+		m.showIntro = false
+		if key == "q" {
+			m.cancelPreviewLoad()
+			m.result = Result{}
+			return tea.Quit, true
+		}
+		return nil, true
 	}
 	if m.showHelp {
 		switch key {
@@ -302,10 +373,10 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 		switch key {
 		case "enter":
 			m.finishFilter(true)
-			return nil, true
+			return m.schedulePreview(), true
 		case "esc":
 			m.finishFilter(false)
-			return nil, true
+			return m.schedulePreview(), true
 		default:
 			return nil, false
 		}
@@ -313,6 +384,7 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 
 	switch key {
 	case "q":
+		m.cancelPreviewLoad()
 		m.result = Result{}
 		return tea.Quit, true
 	case "?":
@@ -320,17 +392,23 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 	case "tab", "right", "l":
 		m.focus = (m.focus + 1) % 2
 		m.notice = ""
+		return m.schedulePreview(), true
 	case "shift+tab", "left":
 		m.focus = (m.focus + 1) % 2
 		m.notice = ""
+		return m.schedulePreview(), true
 	case "up", "k":
 		m.moveSelection(-1)
+		return m.schedulePreview(), true
 	case "down", "j":
 		m.moveSelection(1)
+		return m.schedulePreview(), true
 	case "pgup":
 		m.moveSelection(-5)
+		return m.schedulePreview(), true
 	case "pgdown":
 		m.moveSelection(5)
+		return m.schedulePreview(), true
 	case "/":
 		m.startFilter()
 		return m.filterInput.Focus(), true
@@ -345,6 +423,7 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 		m.localLoading = true
 		m.localError = ""
 		m.notice = ""
+		m.clearPreview()
 		command := m.loadLocal(m.localSeq)
 		if spinnerRunning {
 			return command, true
@@ -479,9 +558,10 @@ func (m *Model) openActions() {
 }
 
 func (m *Model) refresh() tea.Cmd {
-	if m.anyLoading() {
+	if m.discoveryLoading() {
 		return nil
 	}
+	spinnerRunning := m.anyLoading()
 	m.statusSeq++
 	m.localSeq++
 	m.sharedSeq++
@@ -492,12 +572,16 @@ func (m *Model) refresh() tea.Cmd {
 	m.localError = ""
 	m.sharedError = ""
 	m.notice = ""
-	return tea.Batch(
-		m.spinner.Tick,
+	m.clearPreview()
+	commands := []tea.Cmd{
 		m.loadStatus(m.statusSeq),
 		m.loadLocal(m.localSeq),
 		m.loadShared(m.sharedSeq),
-	)
+	}
+	if !spinnerRunning {
+		commands = append([]tea.Cmd{m.spinner.Tick}, commands...)
+	}
+	return tea.Batch(commands...)
 }
 
 func (m *Model) loadStatus(sequence int) tea.Cmd {
@@ -529,6 +613,108 @@ func (m *Model) loadShared(sequence int) tea.Cmd {
 		contexts, err := m.loader.LoadShared(m.ctx)
 		return sharedLoadedMsg{sequence: sequence, contexts: contexts, err: err}
 	}
+}
+
+func (m *Model) schedulePreview() tea.Cmd {
+	target, ok := m.selectedPreviewTarget()
+	if !ok {
+		m.clearPreview()
+		return nil
+	}
+	if target.key == m.previewKey {
+		return nil
+	}
+
+	spinnerRunning := m.anyLoading()
+	m.cancelPreviewLoad()
+	previewCtx, cancel := context.WithCancel(m.ctx)
+	m.previewCancel = cancel
+	m.previewSeq++
+	m.previewKey = target.key
+	m.preview = sessionpreview.Summary{}
+	m.previewError = ""
+	m.previewLoading = true
+	sequence := m.previewSeq
+
+	debounce := tea.Tick(140*time.Millisecond, func(time.Time) tea.Msg {
+		return previewDebounceMsg{
+			sequence: sequence,
+			target:   target,
+			ctx:      previewCtx,
+		}
+	})
+	if spinnerRunning {
+		return debounce
+	}
+	return tea.Batch(m.spinner.Tick, debounce)
+}
+
+func (m *Model) selectedPreviewTarget() (previewTarget, bool) {
+	if m.focus == localPanel {
+		session, ok := m.selectedLocal()
+		if !ok {
+			return previewTarget{}, false
+		}
+		return previewTarget{
+			key:   "local:" + session.Path + ":" + session.ModifiedAt.UTC().Format(time.RFC3339Nano),
+			local: &session,
+		}, true
+	}
+
+	shared, ok := m.selectedShared()
+	if !ok {
+		return previewTarget{}, false
+	}
+	return previewTarget{
+		key:    "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" + shared.Revision,
+		shared: &shared,
+	}, true
+}
+
+func (m *Model) loadPreview(message previewDebounceMsg) tea.Cmd {
+	return func() tea.Msg {
+		if m.loader == nil {
+			return previewLoadedMsg{
+				sequence: message.sequence,
+				err:      fmt.Errorf("session preview loader is unavailable"),
+			}
+		}
+		var (
+			summary sessionpreview.Summary
+			err     error
+		)
+		switch {
+		case message.target.local != nil:
+			summary, err = m.loader.LoadLocalPreview(message.ctx, *message.target.local)
+		case message.target.shared != nil:
+			summary, err = m.loader.LoadSharedPreview(message.ctx, *message.target.shared)
+		default:
+			err = fmt.Errorf("session preview target is unavailable")
+		}
+		return previewLoadedMsg{sequence: message.sequence, summary: summary, err: err}
+	}
+}
+
+func (m *Model) clearPreview() {
+	m.cancelPreviewLoad()
+	m.previewSeq++
+	m.previewKey = ""
+	m.preview = sessionpreview.Summary{}
+	m.previewError = ""
+	m.previewLoading = false
+}
+
+func (m *Model) cancelPreviewLoad() {
+	if m.previewCancel != nil {
+		m.previewCancel()
+		m.previewCancel = nil
+	}
+}
+
+func (m *Model) tickIntro() tea.Cmd {
+	return tea.Tick(introFrameDelay, func(time.Time) tea.Msg {
+		return introTickMsg{}
+	})
 }
 
 func (m *Model) startFilter() {
@@ -645,6 +831,10 @@ func (m *Model) filteredShared() []SharedContext {
 }
 
 func (m *Model) anyLoading() bool {
+	return m.statusLoading || m.localLoading || m.sharedLoading || m.previewLoading
+}
+
+func (m *Model) discoveryLoading() bool {
 	return m.statusLoading || m.localLoading || m.sharedLoading
 }
 
@@ -652,7 +842,7 @@ func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return sessionpreview.Sanitize(err.Error())
 }
 
 func clamp(value, count int) int {

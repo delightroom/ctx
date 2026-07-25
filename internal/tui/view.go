@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	sessionpreview "github.com/delightroom/ctx/internal/preview"
 )
 
 const (
@@ -27,11 +28,14 @@ func (m *Model) render() string {
 			m.styles.warning.Render(message),
 		)
 	}
+	if m.showIntro {
+		return m.renderIntro()
+	}
 
 	header := m.renderHeader()
 	footer := m.renderFooter()
 	contentHeight := max(1, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
-	detailHeight := max(6, contentHeight/3)
+	detailHeight := max(10, contentHeight/2)
 	listsHeight := contentHeight - detailHeight
 
 	var lists string
@@ -54,7 +58,12 @@ func (m *Model) render() string {
 	}
 
 	detail := m.renderDetailPanel(m.width, detailHeight)
-	base := lipgloss.JoinVertical(lipgloss.Left, header, lists, detail, footer)
+	body := lipgloss.JoinVertical(lipgloss.Left, header, lists, detail)
+	body = lipgloss.NewStyle().
+		Width(m.width).
+		Height(max(1, m.height-lipgloss.Height(footer))).
+		Render(body)
+	base := lipgloss.JoinVertical(lipgloss.Left, body, footer)
 	base = lipgloss.NewStyle().Width(m.width).Height(m.height).Render(base)
 
 	if m.showHelp {
@@ -183,7 +192,7 @@ func (m *Model) renderSharedPanel(width, height int) string {
 		for index := start; index < min(len(items), start+rows); index++ {
 			shared := items[index]
 			row := fmt.Sprintf("%-26s %-7s %s",
-				shared.Node+"/"+shared.Name,
+				displayValue(shared.Node, "-")+"/"+displayValue(shared.Name, "-"),
 				displayAgent(shared.SourceAgent),
 				relativeTime(shared.UpdatedAt),
 			)
@@ -194,7 +203,11 @@ func (m *Model) renderSharedPanel(width, height int) string {
 }
 
 func (m *Model) renderDetailPanel(width, height int) string {
-	lines := []string{m.styles.title.Render("SELECTION")}
+	scope := "LOCAL"
+	if m.focus == sharedPanel {
+		scope = "SHARED"
+	}
+	lines := []string{m.styles.title.Render("SELECTION  " + scope)}
 	if m.notice != "" {
 		lines = append(lines, m.styles.warning.Render(cellTruncate(m.notice, width-6)))
 	}
@@ -205,18 +218,23 @@ func (m *Model) renderDetailPanel(width, height int) string {
 			lines = append(lines, m.styles.muted.Render("Select a local session to inspect and host."))
 		} else {
 			lines = append(lines,
-				fmt.Sprintf("Provider  %s    Project  %s    Updated  %s",
-					displayAgent(session.SourceAgent), displayValue(session.Project, "-"), relativeTime(session.ModifiedAt)),
-				"Session   "+displayValue(session.SessionID, "-"),
-				"Workspace "+displayValue(session.CWD, "-"),
-				"Source    "+displayValue(session.Path, "-"),
+				fmt.Sprintf("%s · %s · %s · session %s",
+					displayAgent(session.SourceAgent),
+					displayValue(session.Project, "-"),
+					relativeTime(session.ModifiedAt),
+					displayValue(session.SessionID, "-")),
 			)
 			if m.status.TailnetReady {
-				lines = append(lines, m.styles.success.Render("Action: Enter or h to host this session"))
+				lines = append(lines, m.styles.success.Render("Enter / h  Host this session"))
 			} else {
 				reason := displayValue(m.status.TailnetError, "connect Tailscale first")
 				lines = append(lines, m.styles.warning.Render("Host unavailable: "+reason))
 			}
+			lines = append(lines, m.renderPreviewLines()...)
+			lines = append(lines,
+				detailLine(m, "Workspace", displayValue(session.CWD, "-")),
+				detailLine(m, "Source", displayValue(session.Path, "-")),
+			)
 		}
 	} else {
 		shared, ok := m.selectedShared()
@@ -224,12 +242,17 @@ func (m *Model) renderDetailPanel(width, height int) string {
 			lines = append(lines, m.styles.muted.Render("Select a shared context to tail or continue."))
 		} else {
 			lines = append(lines,
-				fmt.Sprintf("Context   %s    Provider  %s    Updated  %s",
-					shared.Locator(), displayAgent(shared.SourceAgent), relativeTime(shared.UpdatedAt)),
-				fmt.Sprintf("Project   %s    Owner  %s", displayValue(shared.Project, "-"), displayValue(shared.Owner, "-")),
-				"Revision  "+displayValue(shared.Revision, "-"),
-				"Actions   Enter · t tail · f follow · c continue",
+				fmt.Sprintf("%s · %s · %s · %s",
+					displayLocator(shared),
+					displayAgent(shared.SourceAgent),
+					displayValue(shared.Project, "-"),
+					relativeTime(shared.UpdatedAt)),
+				fmt.Sprintf("Owner %s · revision %s",
+					displayValue(shared.Owner, "-"),
+					displayValue(shared.Revision, "-")),
+				m.styles.success.Render("Enter actions · t tail · f follow · c continue"),
 			)
+			lines = append(lines, m.renderPreviewLines()...)
 		}
 	}
 
@@ -237,14 +260,67 @@ func (m *Model) renderDetailPanel(width, height int) string {
 	return m.renderPanel(content, width, height, false)
 }
 
+func (m *Model) renderPreviewLines(metadata ...string) []string {
+	lines := []string{m.styles.title.Render("SESSION PEEK")}
+	switch {
+	case m.previewLoading:
+		lines = append(lines, m.spinner.View()+" Reading the selected session...")
+		return append(lines, metadata...)
+	case m.previewError != "":
+		lines = append(lines, m.styles.warning.Render("Preview unavailable: "+m.previewError))
+		return append(lines, metadata...)
+	case m.previewKey == "":
+		lines = append(lines, m.styles.muted.Render("Move onto a session to load its preview."))
+		return append(lines, metadata...)
+	}
+
+	if m.preview.CurrentRequest != "" {
+		lines = append(lines, detailLine(m, "Current", m.preview.CurrentRequest))
+	} else {
+		lines = append(lines, detailLine(m, "Current", "No user message in the visible digest."))
+	}
+	lines = append(lines, detailLine(m, "Activity", activitySummary(m.preview)))
+	lines = append(lines, metadata...)
+	if len(m.preview.Recent) > 0 {
+		lines = append(lines, m.styles.title.Render("RECENT TURNS"))
+		for _, turn := range m.preview.Recent {
+			lines = append(lines, detailLine(m, turn.Role, turn.Text))
+		}
+	}
+	return lines
+}
+
+func detailLine(m *Model, label, value string) string {
+	return m.styles.muted.Render(fmt.Sprintf("%-10s", label)) + value
+}
+
+func activitySummary(summary sessionpreview.Summary) string {
+	activity := fmt.Sprintf(
+		"%d events · %d you · %d agent · %d tool calls",
+		summary.EventCount,
+		summary.UserTurns,
+		summary.AgentTurns,
+		summary.ToolCalls,
+	)
+	if len(summary.Tools) > 0 {
+		limit := min(4, len(summary.Tools))
+		activity += " · " + strings.Join(summary.Tools[:limit], ", ")
+		if len(summary.Tools) > limit {
+			activity += fmt.Sprintf(" +%d", len(summary.Tools)-limit)
+		}
+	}
+	if summary.Truncated {
+		activity += " · digest clipped"
+	}
+	return activity
+}
+
 func (m *Model) renderPanel(content string, width, height int, active bool) string {
 	style := m.styles.panel
 	if active {
 		style = m.styles.panelActive
 	}
-	innerWidth := max(1, width-4)
-	innerHeight := max(1, height-2)
-	return style.Width(innerWidth).Height(innerHeight).Render(content)
+	return style.Width(max(1, width)).Height(max(1, height)).Render(content)
 }
 
 func (m *Model) renderRow(value string, width int, selected bool) string {
@@ -392,10 +468,19 @@ func displayAgent(value string) string {
 }
 
 func displayValue(value, fallback string) string {
+	value = sessionpreview.Sanitize(value)
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
 	return value
+}
+
+func displayLocator(shared SharedContext) string {
+	return fmt.Sprintf(
+		"ctx://%s/%s",
+		displayValue(shared.Node, "-"),
+		displayValue(shared.Name, "-"),
+	)
 }
 
 func relativeTime(value time.Time) string {

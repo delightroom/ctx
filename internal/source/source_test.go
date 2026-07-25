@@ -1,11 +1,15 @@
 package source
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/delightroom/ctx/internal/protocol"
 )
 
 func TestClaudeSnapshot(t *testing.T) {
@@ -84,6 +88,116 @@ func TestRevisionIsStableForSameContent(t *testing.T) {
 	}
 	if first.Manifest.Revision != second.Manifest.Revision {
 		t.Fatalf("revision changed: %s != %s", first.Manifest.Revision, second.Manifest.Revision)
+	}
+}
+
+func TestSnapshotContextHonorsCancellation(t *testing.T) {
+	path := writeFixture(t, "cancelled.jsonl",
+		`{"type":"user","sessionId":"claude-1","cwd":"/work/payments","message":{"role":"user","content":"same"}}`)
+	session, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = session.SnapshotContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SnapshotContext error = %v", err)
+	}
+}
+
+func TestPreviewContextStreamsFullSessionIntoBoundedSummary(t *testing.T) {
+	var lines []string
+	lines = append(lines,
+		`{"type":"user","sessionId":"claude-1","cwd":"/work/payments","message":{"role":"user","content":"first request"}}`,
+	)
+	for index := range 100 {
+		lines = append(lines,
+			`{"type":"assistant","sessionId":"claude-1","cwd":"/work/payments","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-id","name":"tool-`+
+				string(rune('a'+index%26))+`","input":{}}]}}`,
+		)
+	}
+	lines = append(lines,
+		`{"type":"user","sessionId":"claude-1","cwd":"/work/payments","message":{"role":"user","content":"current request"}}`,
+	)
+	path := writeFixture(t, "preview.jsonl", strings.Join(lines, "\n"))
+	session, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := session.PreviewContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentRequest != "current request" || summary.EventCount != 102 ||
+		summary.ToolCalls != 100 || len(summary.Tools) != 4 || len(summary.Recent) != 2 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestLimitEventsPreservesRecentConversationAcrossLargeToolOutput(t *testing.T) {
+	events := []protocol.Event{
+		{ID: "developer-1", Role: "developer", Kind: "message", Text: "rules"},
+		{ID: "developer-2", Role: "developer", Kind: "message", Text: "more rules"},
+		{ID: "user-old", Role: "user", Kind: "message", Text: "old request"},
+		{ID: "assistant-old", Role: "assistant", Kind: "message", Text: "old reply"},
+		{ID: "user-current", Role: "user", Kind: "message", Text: "current request"},
+		{ID: "tool-large", Role: "tool", Kind: "tool_result", Text: strings.Repeat("x", 200)},
+		{ID: "assistant-current", Role: "assistant", Kind: "message", Text: "current reply"},
+		{ID: "tool-latest", Role: "tool", Kind: "tool_result", Text: strings.Repeat("y", 200)},
+	}
+
+	limited, truncated := limitEvents(events, 1000)
+	if !truncated {
+		t.Fatal("events were not truncated")
+	}
+	var ids []string
+	for _, event := range limited {
+		ids = append(ids, event.ID)
+	}
+	joined := strings.Join(ids, ",")
+	if !strings.Contains(joined, "user-current") ||
+		!strings.Contains(joined, "assistant-current") ||
+		!strings.Contains(joined, "omitted") {
+		t.Fatalf("limited events = %s", joined)
+	}
+	if strings.Index(joined, "user-current") > strings.Index(joined, "assistant-current") {
+		t.Fatalf("conversation order changed: %s", joined)
+	}
+}
+
+func TestLimitEventsBudgetsMetadataAndUsesOneOmissionMarker(t *testing.T) {
+	events := make([]protocol.Event, 500)
+	for index := range events {
+		events[index] = protocol.Event{
+			ID:         strings.Repeat("i", 40),
+			Role:       "assistant",
+			Kind:       "tool_call",
+			ToolName:   strings.Repeat("tool", 20),
+			ToolCallID: strings.Repeat("call", 20),
+		}
+	}
+
+	const limit = 4 * 1024
+	limited, truncated := limitEvents(events, limit)
+	if !truncated {
+		t.Fatal("metadata-only events were not truncated")
+	}
+	cost := 0
+	omissions := 0
+	for _, event := range limited {
+		cost += eventBudgetCost(event)
+		if event.Kind == "omission" {
+			omissions++
+		}
+	}
+	if cost > limit {
+		t.Fatalf("limited event cost = %d, want <= %d", cost, limit)
+	}
+	if omissions != 1 {
+		t.Fatalf("omission markers = %d, want 1", omissions)
 	}
 }
 

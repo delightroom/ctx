@@ -642,6 +642,9 @@ func probeFeedBases(
 					feeds, err := list(requestCtx, base)
 					requestCancel()
 					if err == nil {
+						for index := range feeds {
+							feeds[index].BaseURL = base
+						}
 						results <- feeds
 					}
 				}

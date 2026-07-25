@@ -1,4 +1,4 @@
-.TH CTX 1 "2026-07-24" "ctx" "User Commands"
+.TH CTX 1 "2026-07-25" "ctx" "User Commands"
 .SH NAME
 ctx \- share Claude Code and Codex context over a Tailscale tailnet
 .SH SYNOPSIS
@@ -45,10 +45,21 @@ opens the dashboard explicitly. It discovers local Claude Code and Codex
 sessions alongside shared contexts reachable over the tailnet. Local and
 remote inventories load independently.
 .PP
-The dashboard displays metadata only. It does not render conversation events.
-The local scope defaults to the current workspace. The layout is side by side
-at 100 columns or wider, stacked below 100 columns, and requires at least a
-60 by 18 terminal.
+Resting on a row loads a session peek containing the latest user request,
+activity counts, recent tool names, and up to four recent human and agent
+turns. This summary is deterministic and extractive. It runs in process over
+normalized events with display redaction and does not call a local or cloud
+LLM. Local previews stream from the selected session file into fixed-size
+summary state. Shared previews fetch a size-limited digest from the selected
+provider.
+.PP
+Preview reads are debounced, cached by the session's content version, and
+cancelled when the selection changes. The local scope defaults to the current
+workspace. The layout is side by side at 100 columns or wider, stacked below
+100 columns, and requires at least a 60 by 18 terminal.
+.PP
+The dashboard opens with a brief dog-and-cat string-phone animation. Press any
+key to skip it.
 .SS Keys
 .TP
 .B Tab, Shift\-Tab
@@ -67,7 +78,7 @@ Filter the focused panel.
 Toggle current-workspace and all-workspaces local discovery.
 .TP
 .B r
-Refresh status and both inventories.
+Refresh status, both inventories, and the selected preview.
 .TP
 .B Enter
 Open the actions available for the selected item.
@@ -93,6 +104,11 @@ Selecting an action closes the alternate screen before starting the existing
 or
 .B continue
 flow.
+.SH ENVIRONMENT
+.TP
+.B CTX_NO_ANIMATION
+When non-empty, disable motion in the dashboard and standalone installer. The
+installer still prints the final static welcome on the first install.
 .SH COMMANDS
 .TP
 .B tui

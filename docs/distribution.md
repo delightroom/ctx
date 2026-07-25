@@ -32,7 +32,12 @@ The installer:
 3. downloads the matching archive and `checksums.txt`;
 4. verifies SHA-256 before extracting anything;
 5. atomically installs `ctx`;
-6. records `standalone` as the installation method for `ctx update`.
+6. records `standalone` as the installation method for `ctx update`;
+7. shows the string-phone welcome only when no prior installation record
+   exists.
+
+Set `CTX_NO_ANIMATION=1` to render the final first-install artwork without
+motion. Non-interactive and `TERM=dumb` installs also use the static form.
 
 ## Installer hosting
 
@@ -50,8 +55,8 @@ release assets are publicly reachable from an unauthenticated machine.
 ## Testing
 
 The installer integration test creates a local fake release, serves it through
-the same URL layout, and verifies the installed executable and installation
-record:
+the same URL layout, and verifies the installed executable, installation
+record, first-install welcome, and update suppression:
 
 ```bash
 make test-installer

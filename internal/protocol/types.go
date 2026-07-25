@@ -42,6 +42,7 @@ type FeedSummary struct {
 	Project     string    `json:"project"`
 	Revision    string    `json:"revision"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	BaseURL     string    `json:"-"`
 }
 
 func (m Manifest) Summary() FeedSummary {
