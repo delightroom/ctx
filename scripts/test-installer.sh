@@ -48,10 +48,12 @@ CTX_RELEASE_ROOT="file://${test_root}/releases" \
   --no-modify-path >"${test_root}/first-install.log"
 
 installed_output=$("${install_directory}/ctx")
+canonical_install_directory=$(cd "$install_directory" && pwd)
 [ "$installed_output" = "ctx test release ${version}" ]
 [ "$(grep -c "context travels better together" "${test_root}/first-install.log")" -eq 1 ]
+grep -F "ctx ${version} · ${target_os}/${target_arch} · standalone" "${test_root}/first-install.log" >/dev/null
+grep -F "binary  ${canonical_install_directory}/ctx" "${test_root}/first-install.log" >/dev/null
 [ "$(sed -n '1p' "${data_directory}/ctx/install-method")" = "standalone" ]
-canonical_install_directory=$(cd "$install_directory" && pwd)
 [ "$(sed -n '2p' "${data_directory}/ctx/install-method")" = "${canonical_install_directory}/ctx" ]
 
 HOME="$home_directory" \

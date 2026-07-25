@@ -198,6 +198,12 @@ func (f *File) SnapshotContext(ctx context.Context) (protocol.Digest, error) {
 // PreviewContext extracts the small set of display fields in a streaming pass.
 // Unlike SnapshotContext, memory use does not grow with the session history.
 func (f *File) PreviewContext(ctx context.Context) (preview.Summary, error) {
+	return f.PreviewPageContext(ctx, 1)
+}
+
+// PreviewPageContext returns one newest-first transcript page while retaining
+// only the summary, the newest page, and the requested page in memory.
+func (f *File) PreviewPageContext(ctx context.Context, requestedPage int) (preview.Summary, error) {
 	if err := contextError(ctx); err != nil {
 		return preview.Summary{}, err
 	}
@@ -208,18 +214,78 @@ func (f *File) PreviewContext(ctx context.Context) (preview.Summary, error) {
 	defer handle.Close()
 
 	var accumulator preview.Accumulator
-	switch f.agent {
-	case "claude-code":
-		_, err = scanClaude(ctx, handle, accumulator.Add)
-	case "codex-cli":
-		_, err = scanCodex(ctx, handle, accumulator.Add)
-	default:
-		err = fmt.Errorf("unsupported source agent %q", f.agent)
+	total := 0
+	newest := make([]preview.Entry, 0, preview.DefaultPageSize)
+	err = f.scanPreviewEvents(ctx, handle, func(event protocol.Event) bool {
+		accumulator.Add(event)
+		entry, ok := preview.EntryFromEvent(event)
+		if !ok {
+			return true
+		}
+		total++
+		if len(newest) == preview.DefaultPageSize {
+			copy(newest, newest[1:])
+			newest[len(newest)-1] = entry
+		} else {
+			newest = append(newest, entry)
+		}
+		return true
+	})
+	if err != nil {
+		return preview.Summary{}, err
+	}
+
+	page, pages, start, end := preview.PageBounds(
+		total,
+		requestedPage,
+		preview.DefaultPageSize,
+	)
+	entries := newest
+	if page > 1 {
+		if _, err := handle.Seek(0, io.SeekStart); err != nil {
+			return preview.Summary{}, err
+		}
+		entries = make([]preview.Entry, 0, end-start)
+		index := 0
+		err = f.scanPreviewEvents(ctx, handle, func(event protocol.Event) bool {
+			entry, ok := preview.EntryFromEvent(event)
+			if !ok {
+				return true
+			}
+			if index >= start && index < end {
+				entries = append(entries, entry)
+			}
+			index++
+			return index < end
+		})
 	}
 	if err != nil {
 		return preview.Summary{}, err
 	}
-	return accumulator.Summary(false), nil
+	return preview.AttachPage(
+		accumulator.Summary(false),
+		entries,
+		total,
+		page,
+		pages,
+	), nil
+}
+
+func (f *File) scanPreviewEvents(
+	ctx context.Context,
+	reader io.Reader,
+	consume func(protocol.Event) bool,
+) error {
+	switch f.agent {
+	case "claude-code":
+		_, err := scanClaude(ctx, reader, consume)
+		return err
+	case "codex-cli":
+		_, err := scanCodex(ctx, reader, consume)
+		return err
+	default:
+		return fmt.Errorf("unsupported source agent %q", f.agent)
+	}
 }
 
 func Detect(path string) (string, error) {
@@ -461,8 +527,9 @@ func codexSessionCWD(path, cwd string) (bool, error) {
 
 func parseClaude(ctx context.Context, reader io.Reader) (protocol.Digest, error) {
 	var digest protocol.Digest
-	manifest, err := scanClaude(ctx, reader, func(event protocol.Event) {
+	manifest, err := scanClaude(ctx, reader, func(event protocol.Event) bool {
 		digest.Events = append(digest.Events, event)
+		return true
 	})
 	digest.Manifest = manifest
 	return digest, err
@@ -471,7 +538,7 @@ func parseClaude(ctx context.Context, reader io.Reader) (protocol.Digest, error)
 func scanClaude(
 	ctx context.Context,
 	reader io.Reader,
-	consume func(protocol.Event),
+	consume func(protocol.Event) bool,
 ) (protocol.Manifest, error) {
 	var manifest protocol.Manifest
 	scanner := bufio.NewScanner(reader)
@@ -509,7 +576,9 @@ func scanClaude(
 			continue
 		}
 		for _, event := range claudeContent(message.Role, envelope.Timestamp, line, message.Content) {
-			consume(event)
+			if !consume(event) {
+				return manifest, nil
+			}
 		}
 	}
 	return manifest, scanner.Err()
@@ -556,8 +625,9 @@ func claudeContent(role string, timestamp time.Time, line int, content json.RawM
 
 func parseCodex(ctx context.Context, reader io.Reader) (protocol.Digest, error) {
 	var digest protocol.Digest
-	manifest, err := scanCodex(ctx, reader, func(event protocol.Event) {
+	manifest, err := scanCodex(ctx, reader, func(event protocol.Event) bool {
 		digest.Events = append(digest.Events, event)
+		return true
 	})
 	digest.Manifest = manifest
 	return digest, err
@@ -566,7 +636,7 @@ func parseCodex(ctx context.Context, reader io.Reader) (protocol.Digest, error) 
 func scanCodex(
 	ctx context.Context,
 	reader io.Reader,
-	consume func(protocol.Event),
+	consume func(protocol.Event) bool,
 ) (protocol.Manifest, error) {
 	var manifest protocol.Manifest
 	scanner := bufio.NewScanner(reader)
@@ -618,24 +688,30 @@ func scanCodex(
 					text = stringValue(block["output_text"])
 				}
 				if text != "" {
-					consume(protocol.Event{
+					if !consume(protocol.Event{
 						ID: fmt.Sprintf("%d-%d", line, index), Timestamp: envelope.Timestamp,
 						Role: role, Kind: "message", Text: text,
-					})
+					}) {
+						return manifest, nil
+					}
 				}
 			}
 		case "function_call", "custom_tool_call":
-			consume(protocol.Event{
+			if !consume(protocol.Event{
 				ID: fmt.Sprintf("%d-0", line), Timestamp: envelope.Timestamp, Role: "assistant",
 				Kind: "tool_call", ToolName: stringValue(item["name"]),
 				ToolCallID: stringValue(item["call_id"]), Text: contentText(item["arguments"]),
-			})
+			}) {
+				return manifest, nil
+			}
 		case "function_call_output", "custom_tool_call_output":
-			consume(protocol.Event{
+			if !consume(protocol.Event{
 				ID: fmt.Sprintf("%d-0", line), Timestamp: envelope.Timestamp, Role: "tool",
 				Kind: "tool_result", ToolCallID: stringValue(item["call_id"]),
 				Text: contentText(item["output"]),
-			})
+			}) {
+				return manifest, nil
+			}
 		}
 	}
 	return manifest, scanner.Err()

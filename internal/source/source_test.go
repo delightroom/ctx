@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/delightroom/ctx/internal/preview"
 	"github.com/delightroom/ctx/internal/protocol"
 )
 
@@ -132,8 +133,37 @@ func TestPreviewContextStreamsFullSessionIntoBoundedSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if summary.CurrentRequest != "current request" || summary.EventCount != 102 ||
-		summary.ToolCalls != 100 || len(summary.Tools) != 4 || len(summary.Recent) != 2 {
+		summary.ToolCalls != 100 || len(summary.Tools) != 4 || len(summary.Recent) != 2 ||
+		summary.TranscriptCount != 102 || len(summary.Entries) != preview.DefaultPageSize {
 		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestPreviewPageContextReadsOlderTranscriptPage(t *testing.T) {
+	var lines []string
+	for index := range 14 {
+		lines = append(lines,
+			`{"type":"user","sessionId":"claude-1","cwd":"/work/payments","message":{"role":"user","content":"message-`+
+				string(rune('a'+index))+`"}}`,
+		)
+	}
+	path := writeFixture(t, "paged-preview.jsonl", strings.Join(lines, "\n"))
+	session, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := session.PreviewPageContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.TranscriptPage != 2 || page.TranscriptPages != 3 ||
+		page.TranscriptCount != 14 || len(page.Entries) != preview.DefaultPageSize {
+		t.Fatalf("page = %+v", page)
+	}
+	if page.Entries[0].Text != "message-c" ||
+		page.Entries[len(page.Entries)-1].Text != "message-h" {
+		t.Fatalf("entries = %+v", page.Entries)
 	}
 }
 

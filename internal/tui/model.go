@@ -64,8 +64,8 @@ type Loader interface {
 	LoadStatus(context.Context) (Status, error)
 	LoadLocal(context.Context, bool) ([]LocalSession, error)
 	LoadShared(context.Context) ([]SharedContext, error)
-	LoadLocalPreview(context.Context, LocalSession) (sessionpreview.Summary, error)
-	LoadSharedPreview(context.Context, SharedContext) (sessionpreview.Summary, error)
+	LoadLocalPreview(context.Context, LocalSession, int) (sessionpreview.Summary, error)
+	LoadSharedPreview(context.Context, SharedContext, int) (sessionpreview.Summary, error)
 }
 
 type Config struct {
@@ -110,6 +110,7 @@ type sharedLoadedMsg struct {
 
 type previewTarget struct {
 	key    string
+	page   int
 	local  *LocalSession
 	shared *SharedContext
 }
@@ -166,6 +167,7 @@ type Model struct {
 	previewError   string
 	previewSeq     int
 	previewCancel  context.CancelFunc
+	previewPage    int
 
 	filterInput    textinput.Model
 	filtering      bool
@@ -173,11 +175,12 @@ type Model struct {
 
 	spinner spinner.Model
 
-	showHelp    bool
-	showActions bool
-	actionIndex int
-	notice      string
-	result      Result
+	showHelp       bool
+	showActions    bool
+	showTranscript bool
+	actionIndex    int
+	notice         string
+	result         Result
 
 	showIntro  bool
 	introFrame int
@@ -211,6 +214,7 @@ func NewModel(config Config) *Model {
 		statusSeq:     1,
 		localSeq:      1,
 		sharedSeq:     1,
+		previewPage:   1,
 		showIntro:     config.ShowIntro,
 	}
 	return model
@@ -299,6 +303,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewLoading = false
 			m.preview = msg.summary
 			m.previewError = errorText(msg.err)
+			if msg.summary.TranscriptPage > 0 {
+				m.previewPage = msg.summary.TranscriptPage
+			}
 		}
 	case introTickMsg:
 		if m.showIntro {
@@ -320,6 +327,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterInput = updated
 		m.setActiveFilter(updated.Value())
 		m.clampSelection()
+		m.previewPage = 1
 		commands = append(commands, command, m.schedulePreview())
 	}
 
@@ -353,6 +361,9 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 			return tea.Quit, true
 		}
 		return nil, true
+	}
+	if m.showTranscript {
+		return m.handleTranscriptKey(key), true
 	}
 	if m.showHelp {
 		switch key {
@@ -392,10 +403,12 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 	case "tab", "right", "l":
 		m.focus = (m.focus + 1) % 2
 		m.notice = ""
+		m.previewPage = 1
 		return m.schedulePreview(), true
 	case "shift+tab", "left":
 		m.focus = (m.focus + 1) % 2
 		m.notice = ""
+		m.previewPage = 1
 		return m.schedulePreview(), true
 	case "up", "k":
 		m.moveSelection(-1)
@@ -431,6 +444,8 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 		return tea.Batch(m.spinner.Tick, command), true
 	case "r":
 		return m.refresh(), true
+	case "v":
+		m.openTranscript()
 	case "enter":
 		m.openActions()
 	case "h":
@@ -445,6 +460,57 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 		return nil, false
 	}
 	return nil, true
+}
+
+func (m *Model) handleTranscriptKey(key string) tea.Cmd {
+	switch key {
+	case "esc", "v":
+		m.showTranscript = false
+	case "q":
+		m.cancelPreviewLoad()
+		m.result = Result{}
+		return tea.Quit
+	case "?", "enter":
+		m.showTranscript = false
+	case "pgup", "[", "left", "h", "up", "k":
+		return m.requestPreviewPage(m.previewPage + 1)
+	case "pgdown", "]", "right", "l", "down", "j":
+		return m.requestPreviewPage(m.previewPage - 1)
+	case "home":
+		return m.requestPreviewPage(m.preview.TranscriptPages)
+	case "end":
+		return m.requestPreviewPage(1)
+	case "r":
+		return m.refresh()
+	}
+	return nil
+}
+
+func (m *Model) openTranscript() {
+	switch {
+	case m.previewLoading:
+		m.notice = "The selected transcript is still loading."
+	case m.previewError != "":
+		m.notice = "Resolve the preview error before opening the transcript."
+	case len(m.preview.Entries) == 0:
+		m.notice = "No displayable transcript entries are available."
+	default:
+		m.showTranscript = true
+		m.notice = ""
+	}
+}
+
+func (m *Model) requestPreviewPage(page int) tea.Cmd {
+	pages := m.preview.TranscriptPages
+	if pages <= 0 || m.previewLoading {
+		return nil
+	}
+	page = max(1, min(page, pages))
+	if page == m.previewPage {
+		return nil
+	}
+	m.previewPage = page
+	return m.schedulePreview()
 }
 
 func (m *Model) handleActionKey(key string) tea.Cmd {
@@ -631,7 +697,13 @@ func (m *Model) schedulePreview() tea.Cmd {
 	m.previewCancel = cancel
 	m.previewSeq++
 	m.previewKey = target.key
-	m.preview = sessionpreview.Summary{}
+	loadingPreview := sessionpreview.Summary{}
+	if m.showTranscript {
+		loadingPreview.TranscriptCount = m.preview.TranscriptCount
+		loadingPreview.TranscriptPages = m.preview.TranscriptPages
+		loadingPreview.TranscriptPage = target.page
+	}
+	m.preview = loadingPreview
 	m.previewError = ""
 	m.previewLoading = true
 	sequence := m.previewSeq
@@ -650,13 +722,17 @@ func (m *Model) schedulePreview() tea.Cmd {
 }
 
 func (m *Model) selectedPreviewTarget() (previewTarget, bool) {
+	page := max(1, m.previewPage)
 	if m.focus == localPanel {
 		session, ok := m.selectedLocal()
 		if !ok {
 			return previewTarget{}, false
 		}
 		return previewTarget{
-			key:   "local:" + session.Path + ":" + session.ModifiedAt.UTC().Format(time.RFC3339Nano),
+			key: "local:" + session.Path + ":" +
+				session.ModifiedAt.UTC().Format(time.RFC3339Nano) +
+				fmt.Sprintf(":page:%d", page),
+			page:  page,
 			local: &session,
 		}, true
 	}
@@ -666,7 +742,9 @@ func (m *Model) selectedPreviewTarget() (previewTarget, bool) {
 		return previewTarget{}, false
 	}
 	return previewTarget{
-		key:    "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" + shared.Revision,
+		key: "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" +
+			shared.Revision + fmt.Sprintf(":page:%d", page),
+		page:   page,
 		shared: &shared,
 	}, true
 }
@@ -685,9 +763,17 @@ func (m *Model) loadPreview(message previewDebounceMsg) tea.Cmd {
 		)
 		switch {
 		case message.target.local != nil:
-			summary, err = m.loader.LoadLocalPreview(message.ctx, *message.target.local)
+			summary, err = m.loader.LoadLocalPreview(
+				message.ctx,
+				*message.target.local,
+				message.target.page,
+			)
 		case message.target.shared != nil:
-			summary, err = m.loader.LoadSharedPreview(message.ctx, *message.target.shared)
+			summary, err = m.loader.LoadSharedPreview(
+				message.ctx,
+				*message.target.shared,
+				message.target.page,
+			)
 		default:
 			err = fmt.Errorf("session preview target is unavailable")
 		}
@@ -702,6 +788,8 @@ func (m *Model) clearPreview() {
 	m.preview = sessionpreview.Summary{}
 	m.previewError = ""
 	m.previewLoading = false
+	m.previewPage = 1
+	m.showTranscript = false
 }
 
 func (m *Model) cancelPreviewLoad() {
@@ -773,6 +861,8 @@ func (m *Model) moveSelection(delta int) {
 		m.sharedIndex = clamp(m.sharedIndex+delta, len(m.filteredShared()))
 	}
 	m.notice = ""
+	m.previewPage = 1
+	m.showTranscript = false
 }
 
 func (m *Model) clampSelection() {

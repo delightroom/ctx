@@ -94,3 +94,66 @@ func TestAccumulatorBoundsRecentTurnsAndTools(t *testing.T) {
 		t.Fatalf("counts = %+v", result)
 	}
 }
+
+func TestBuildPagePaginatesTranscriptNewestFirst(t *testing.T) {
+	var events []protocol.Event
+	for index := range 14 {
+		events = append(events, protocol.Event{
+			Role: "user",
+			Kind: "message",
+			Text: "message-" + string(rune('a'+index)),
+		})
+	}
+
+	newest := BuildPage(protocol.Digest{Events: events}, 1, 6)
+	if newest.TranscriptPage != 1 || newest.TranscriptPages != 3 ||
+		newest.TranscriptCount != 14 || len(newest.Entries) != 6 {
+		t.Fatalf("newest page = %+v", newest)
+	}
+	if newest.Entries[0].Text != "message-i" ||
+		newest.Entries[5].Text != "message-n" {
+		t.Fatalf("newest entries = %+v", newest.Entries)
+	}
+
+	oldest := BuildPage(protocol.Digest{Events: events}, 99, 6)
+	if oldest.TranscriptPage != 3 || len(oldest.Entries) != 2 ||
+		oldest.Entries[0].Text != "message-a" ||
+		oldest.Entries[1].Text != "message-b" {
+		t.Fatalf("oldest page = %+v", oldest)
+	}
+}
+
+func TestTranscriptEntriesHideToolPayloadsAndResults(t *testing.T) {
+	result := BuildPage(protocol.Digest{Events: []protocol.Event{
+		{
+			Role:     "assistant",
+			Kind:     "tool_call",
+			ToolName: "Bash",
+			Text:     `{"command":"echo api_key=very-sensitive-value"}`,
+		},
+		{
+			Role: "tool",
+			Kind: "tool_result",
+			Text: "api_key=another-sensitive-value",
+		},
+	}}, 1, 6)
+
+	if len(result.Entries) != 2 ||
+		result.Entries[0].Text != "Called Bash" ||
+		result.Entries[1].Text != "Result returned" {
+		t.Fatalf("entries = %+v", result.Entries)
+	}
+	combined := result.Entries[0].Text + result.Entries[1].Text
+	if strings.Contains(combined, "sensitive") || strings.Contains(combined, "echo") {
+		t.Fatalf("tool payload leaked into transcript: %q", combined)
+	}
+}
+
+func TestPageBoundsHandlesEmptyAndInvalidRequests(t *testing.T) {
+	if page, pages, start, end := PageBounds(0, 1, 6); page != 0 || pages != 0 || start != 0 || end != 0 {
+		t.Fatalf("empty bounds = %d/%d [%d:%d]", page, pages, start, end)
+	}
+	if page, pages, start, end := PageBounds(7, 0, 0); page != 1 || pages != 2 || start != 1 || end != 7 {
+		t.Fatalf("default bounds = %d/%d [%d:%d]", page, pages, start, end)
+	}
+}

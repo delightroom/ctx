@@ -12,6 +12,8 @@ an untrusted cross-organization sharing service.
 - Dashboard previews render normalized message text, not native session
   envelopes, tool inputs, or tool results. Control sequences are stripped and
   redaction is applied again before display.
+- The paged transcript exposes tool names and result boundaries, but never raw
+  tool arguments or tool-result bodies.
 - `ctx continue` creates a new session from a quarantined prompt. It does not
   import or execute the host's native session.
 

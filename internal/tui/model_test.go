@@ -66,6 +66,13 @@ func TestRenderSessionPeek(t *testing.T) {
 			{Role: "You", Text: "Can we make the metadata useful?"},
 			{Role: "Agent", Text: "I am adding an extractive summary."},
 		},
+		Entries: []preview.Entry{
+			{Role: "You", Kind: "message", Text: "Can we make the metadata useful?"},
+			{Role: "Agent", Kind: "message", Text: "I am adding an extractive summary."},
+		},
+		TranscriptPage:  1,
+		TranscriptPages: 3,
+		TranscriptCount: 14,
 	}
 
 	rendered := stripANSI(model.render())
@@ -73,6 +80,7 @@ func TestRenderSessionPeek(t *testing.T) {
 		"SESSION PEEK",
 		"Current   Improve the session details",
 		"42 events · 6 you · 8 agent · 12 tool calls · Bash, Edit, Read",
+		"14 entries · page 1/3 · v inspect",
 		"RECENT TURNS",
 		"You       Can we make the metadata useful?",
 		"Agent     I am adding an extractive summary.",
@@ -84,9 +92,97 @@ func TestRenderSessionPeek(t *testing.T) {
 	}
 }
 
+func TestTranscriptModalRendersAndPaginates(t *testing.T) {
+	model := readyModel()
+	model.width = 80
+	model.height = 24
+	model.previewKey = "local:/sessions/claude.jsonl:page:1"
+	model.previewPage = 1
+	model.preview = preview.Summary{
+		CurrentRequest:  "Inspect more history",
+		TranscriptPage:  1,
+		TranscriptPages: 3,
+		TranscriptCount: 14,
+		Entries: []preview.Entry{
+			{Role: "You", Kind: "message", Text: "Please inspect the queue retry behavior in more detail."},
+			{Role: "Tool", Kind: "tool_call", Text: "Called Bash"},
+			{Role: "Tool", Kind: "tool_result", Text: "Result returned"},
+			{Role: "Agent", Kind: "message", Text: "The retry path is bounded and observable."},
+		},
+	}
+
+	command, handled := model.handleKey("v")
+	if !handled || command != nil || !model.showTranscript {
+		t.Fatalf("transcript did not open: handled=%v command=%v show=%v", handled, command, model.showTranscript)
+	}
+	rendered := model.render()
+	if lipgloss.Width(rendered) != 80 || lipgloss.Height(rendered) != 24 {
+		t.Fatalf("transcript dimensions = %dx%d", lipgloss.Width(rendered), lipgloss.Height(rendered))
+	}
+	plain := stripANSI(rendered)
+	for _, want := range []string{
+		"SESSION TRANSCRIPT",
+		"PAGE 1 / 3 · NEWEST · 14 ENTRIES",
+		"Please inspect the queue retry behavior",
+		"Called Bash",
+		"PgUp older",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("transcript lacks %q:\n%s", want, plain)
+		}
+	}
+
+	command, handled = model.handleKey("[")
+	if !handled || command == nil || model.previewPage != 2 || !model.previewLoading {
+		t.Fatalf("older page was not scheduled: page=%d loading=%v command=%v",
+			model.previewPage, model.previewLoading, command)
+	}
+	if !model.showTranscript {
+		t.Fatal("transcript closed while changing pages")
+	}
+	if model.preview.TranscriptPage != 2 || model.preview.TranscriptPages != 3 ||
+		model.preview.TranscriptCount != 14 {
+		t.Fatalf("loading page metadata = page %d/%d, count %d",
+			model.preview.TranscriptPage, model.preview.TranscriptPages, model.preview.TranscriptCount)
+	}
+	if rendered = stripANSI(model.render()); !strings.Contains(rendered, "PAGE 2 / 3") ||
+		!strings.Contains(rendered, "Loading transcript page") {
+		t.Fatalf("loading transcript lost page context:\n%s", rendered)
+	}
+	model.handleKey("esc")
+	if model.showTranscript {
+		t.Fatal("escape did not close transcript")
+	}
+}
+
+func TestRenderTranscriptEntryBoundsAndIndentsWrappedText(t *testing.T) {
+	const width = 38
+	lines := renderTranscriptEntry(preview.Entry{
+		Role: "Agent",
+		Text: "This intentionally long response should wrap and then be clipped without escaping the modal.",
+	}, width, 2)
+	if len(lines) != 2 {
+		t.Fatalf("rendered %d lines, want 2: %#v", len(lines), lines)
+	}
+	for _, line := range lines {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("line width = %d, want <= %d: %q", got, width, line)
+		}
+	}
+	if !strings.HasPrefix(lines[1], strings.Repeat(" ", lipgloss.Width("       Agent   "))) {
+		t.Fatalf("continuation is not indented: %q", lines[1])
+	}
+	if !strings.HasSuffix(lines[1], "…") {
+		t.Fatalf("clipped continuation lacks ellipsis: %q", lines[1])
+	}
+}
+
 func TestIntroAnimatesAndCanBeSkipped(t *testing.T) {
 	model := readyModel()
 	model.showIntro = true
+	if duration := time.Duration(introFrameCount) * introFrameDelay; duration < 1700*time.Millisecond {
+		t.Fatalf("intro duration = %s, want roughly two seconds", duration)
+	}
 	rendered := stripANSI(model.render())
 	if !strings.Contains(rendered, "context travels better together") ||
 		!strings.Contains(rendered, "/\\_/\\") {
@@ -313,7 +409,8 @@ func TestScopeReloadRestartsOnlyStoppedSpinner(t *testing.T) {
 }
 
 type fakeLoader struct {
-	loadedAll bool
+	loadedAll   bool
+	previewPage int
 }
 
 func (loader *fakeLoader) LoadStatus(context.Context) (Status, error) {
@@ -329,11 +426,13 @@ func (loader *fakeLoader) LoadShared(context.Context) ([]SharedContext, error) {
 	return nil, nil
 }
 
-func (loader *fakeLoader) LoadLocalPreview(context.Context, LocalSession) (preview.Summary, error) {
+func (loader *fakeLoader) LoadLocalPreview(_ context.Context, _ LocalSession, page int) (preview.Summary, error) {
+	loader.previewPage = page
 	return preview.Summary{}, nil
 }
 
-func (loader *fakeLoader) LoadSharedPreview(context.Context, SharedContext) (preview.Summary, error) {
+func (loader *fakeLoader) LoadSharedPreview(_ context.Context, _ SharedContext, page int) (preview.Summary, error) {
+	loader.previewPage = page
 	return preview.Summary{}, nil
 }
 
