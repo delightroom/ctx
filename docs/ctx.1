@@ -1,0 +1,169 @@
+.TH CTX 1 "2026-07-24" "ctx" "User Commands"
+.SH NAME
+ctx \- share Claude Code and Codex context over a Tailscale tailnet
+.SH SYNOPSIS
+.B ctx
+.br
+.B ctx tui
+.br
+.B ctx host
+[\fB\-\-name\fR \fINAME\fR]
+[\fB\-\-source\fR \fISESSION.jsonl\fR]
+.br
+.B ctx host ls
+[\fB\-\-all\fR] [\fB\-\-json\fR]
+.br
+.B ctx ls
+[\fIHOST\fR]
+.br
+.B ctx tail
+[\fB\-f\fR] [\fIHOST/FEED\fR]
+.br
+.B ctx continue
+[\fB\-\-with\fR \fIclaude|codex\fR] [\fIHOST/FEED\fR]
+.br
+.B ctx doctor
+.br
+.B ctx update
+.br
+.B ctx completion
+\fIbash|zsh|fish\fR
+.SH DESCRIPTION
+.B ctx
+publishes normalized, read-only agent context from a producer and lets
+consumers discover, inspect, tail, or continue it over a private Tailscale
+tailnet.
+.PP
+When standard input and output are interactive terminals, bare
+.B ctx
+opens the context dashboard. In scripts, CI, and redirected pipelines it
+prints command help instead. Explicit subcommands never change their output
+format based on the dashboard.
+.SH DASHBOARD
+.B ctx tui
+opens the dashboard explicitly. It discovers local Claude Code and Codex
+sessions alongside shared contexts reachable over the tailnet. Local and
+remote inventories load independently.
+.PP
+The dashboard displays metadata only. It does not render conversation events.
+The local scope defaults to the current workspace. The layout is side by side
+at 100 columns or wider, stacked below 100 columns, and requires at least a
+60 by 18 terminal.
+.SS Keys
+.TP
+.B Tab, Shift\-Tab
+Change the focused panel.
+.TP
+.B Up, Down, j, k
+Move the selection.
+.TP
+.B PageUp, PageDown
+Move five rows.
+.TP
+.B /
+Filter the focused panel.
+.TP
+.B a
+Toggle current-workspace and all-workspaces local discovery.
+.TP
+.B r
+Refresh status and both inventories.
+.TP
+.B Enter
+Open the actions available for the selected item.
+.TP
+.B h
+Host the selected local session.
+.TP
+.B t, f
+Tail the selected shared context once, or follow new revisions.
+.TP
+.B c
+Continue the selected shared context with an installed agent.
+.TP
+.B ?
+Open or close keyboard help.
+.TP
+.B q, Ctrl\-C
+Quit.
+.PP
+Selecting an action closes the alternate screen before starting the existing
+.BR host ,
+.BR tail ,
+or
+.B continue
+flow.
+.SH COMMANDS
+.TP
+.B tui
+Open the interactive context dashboard. This command requires a terminal.
+.TP
+.B host
+Publish the current or explicitly selected local agent session. The process
+stays in the foreground until interrupted.
+.TP
+.B host ls
+List hostable Claude Code and Codex sessions. The default scope is the current
+workspace; use
+.B \-\-all
+to scan every local workspace or
+.B \-\-json
+for machine-readable output.
+.TP
+.B ls
+List feeds from one host, or discover feeds from online tailnet peers when no
+host is given.
+.TP
+.B tail
+Print the latest neutral digest. Use
+.B \-f
+or
+.B \-\-follow
+to poll for new revisions.
+.TP
+.B continue
+Fetch and pin a neutral digest, then start Claude Code or Codex with that
+digest as quarantined context. This does not import a native session.
+.TP
+.B doctor
+Check installation, Tailscale connectivity, local agent commands, and session
+discovery.
+.TP
+.B update
+Update using the installation method recorded for the current binary.
+.TP
+.B completion
+Write shell completion setup for Bash, Zsh, or Fish.
+.SH EXAMPLES
+Open the dashboard:
+.PP
+.EX
+ctx
+ctx tui
+.EE
+.PP
+Host a selected local session:
+.PP
+.EX
+ctx host ls
+ctx host \-\-source ~/.claude/projects/.../session.jsonl
+.EE
+.PP
+Consume a shared context:
+.PP
+.EX
+ctx ls
+ctx tail \-f ctx://dev\-laptop/payments
+ctx continue ctx://dev\-laptop/payments \-\-with codex
+.EE
+.SH EXIT STATUS
+Returns 0 on success or user cancellation and non-zero for invalid arguments,
+missing prerequisites, discovery failures, or command execution errors.
+.SH SECURITY
+The provider exposes normalized, read-only history rather than native session
+files. Remote content is quarantined and cannot supply executable host code.
+Tailscale Serve provides transport identity and tailnet access policy.
+.SH SEE ALSO
+.UR https://github.com/delightroom/ctx
+Project documentation
+.UE

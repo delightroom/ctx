@@ -35,7 +35,7 @@ var Version = "dev"
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		if canPrompt(stdin, stdout) {
-			if err := launch(stdin, stdout, stderr); err != nil {
+			if err := runTUI(stdin, stdout, stderr); err != nil {
 				if errors.Is(err, errCancelled) {
 					return 0
 				}
@@ -64,6 +64,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = update(args[1:], stdin, stdout, stderr)
 	case "completion":
 		err = completion(args[1:], stdout)
+	case "tui":
+		err = tuiCommand(args[1:], stdin, stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, Version)
 		return 0
@@ -91,6 +93,7 @@ func usage(writer io.Writer) {
 
 Usage:
   ctx
+  ctx tui
   ctx host [--name NAME] [--source SESSION.jsonl]
   ctx host ls [--all] [--json]
   ctx ls [HOST]
@@ -101,7 +104,8 @@ Usage:
   ctx completion bash|zsh|fish
 
 Commands:
-  ctx        Open the interactive context launcher
+  ctx        Open the interactive context dashboard
+  tui        Open the context dashboard explicitly
   host       Publish the current Claude or Codex session
   host ls    List local Claude and Codex sessions available to host
   ls         List feeds from one host or discover tailnet hosts
@@ -109,7 +113,9 @@ Commands:
   continue   Start a new local agent from a pinned neutral digest
   doctor     Diagnose installation, Tailscale, and agent sessions
   update     Update ctx using its original installation method
-  completion Generate shell completion setup`)
+  completion Generate shell completion setup
+
+Run "ctx tui --help" for dashboard keyboard controls.`)
 }
 
 func host(args []string, stdout, stderr io.Writer) error {
@@ -579,29 +585,75 @@ func discoverFeeds(ctx context.Context, host string, timeout time.Duration) ([]p
 		}
 	}
 
-	type result struct {
-		feeds []protocol.FeedSummary
+	return discoverFeedBases(ctx, bases, timeout), nil
+}
+
+func discoverFeedBases(
+	ctx context.Context,
+	bases []string,
+	timeout time.Duration,
+) []protocol.FeedSummary {
+	client := ctxclient.New(timeout)
+	return probeFeedBases(ctx, bases, timeout, client.List)
+}
+
+const maxConcurrentHostProbes = 8
+
+type feedListFunc func(context.Context, string) ([]protocol.FeedSummary, error)
+
+func probeFeedBases(
+	ctx context.Context,
+	bases []string,
+	timeout time.Duration,
+	list feedListFunc,
+) []protocol.FeedSummary {
+	if len(bases) == 0 {
+		return nil
 	}
-	results := make(chan result, len(bases))
-	var wait sync.WaitGroup
+
+	jobs := make(chan string, len(bases))
 	for _, base := range bases {
+		jobs <- base
+	}
+	close(jobs)
+
+	results := make(chan []protocol.FeedSummary, len(bases))
+	var wait sync.WaitGroup
+	workers := min(maxConcurrentHostProbes, len(bases))
+	for range workers {
 		wait.Add(1)
-		go func(base string) {
+		go func() {
 			defer wait.Done()
-			requestCtx, requestCancel := context.WithTimeout(ctx, timeout)
-			defer requestCancel()
-			feeds, err := ctxclient.New(timeout).List(requestCtx, base)
-			if err == nil {
-				results <- result{feeds: feeds}
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case base, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					requestCtx, requestCancel := context.WithTimeout(ctx, timeout)
+					feeds, err := list(requestCtx, base)
+					requestCancel()
+					if err == nil {
+						results <- feeds
+					}
+				}
 			}
-		}(base)
+		}()
 	}
 	wait.Wait()
 	close(results)
 
 	var feeds []protocol.FeedSummary
 	for item := range results {
-		feeds = append(feeds, item.feeds...)
+		feeds = append(feeds, item...)
 	}
 	sort.Slice(feeds, func(i, j int) bool {
 		if feeds[i].Node == feeds[j].Node {
@@ -609,5 +661,5 @@ func discoverFeeds(ctx context.Context, host string, timeout time.Duration) ([]p
 		}
 		return feeds[i].Node < feeds[j].Node
 	})
-	return feeds, nil
+	return feeds
 }

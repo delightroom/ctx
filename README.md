@@ -21,7 +21,7 @@ Pin a release or choose an installation directory when needed:
 
 ```bash
 curl -fsSL https://delightroom.github.io/ctx/install.sh | \
-  sh -s -- --version v0.1.0
+  sh -s -- --version v0.2.0
 
 curl -fsSL https://delightroom.github.io/ctx/install.sh | \
   sh -s -- --install-dir "$HOME/bin"
@@ -29,37 +29,51 @@ curl -fsSL https://delightroom.github.io/ctx/install.sh | \
 
 ## Start with `ctx`
 
-Run `ctx` without arguments to open the interactive launcher:
+Run `ctx` without arguments in a terminal to open the context dashboard.
+`ctx tui` is the explicit equivalent.
 
 ```text
 $ ctx
 
-ctx 0.1.0
-
-✓ Tailscale connected as dev-laptop
-✓ Claude Code and Codex detected
-– Discovering shared contexts...
-
-Available contexts
-
-  1. review-host/release-review       Codex    14s ago
-  2. api-host/payment-debug           Claude    2m ago
-
-What do you want to do?
-  1. Continue a context
-  2. Tail a context
-  3. Host this session
-  4. Diagnose setup
+ctx 0.3.0  |  TAILNET dev-laptop  |  AGENTS Claude Code + Codex
+╭─────────────────────────────────────╮╭───────────────────────────────────╮
+│ > LOCAL SESSIONS  WORKSPACE  2      ││   SHARED CONTEXTS  2             │
+│ > Claude  payments           14s ago││   review-host/release-review Codex│
+│   Codex   ctx                 2m ago││   api-host/payment-debug   Claude│
+╰─────────────────────────────────────╯╰───────────────────────────────────╯
+╭─────────────────────────────────────────────────────────────────────────╮
+│ SELECTION                                                               │
+│ Provider Claude  Project payments  Updated 14s ago                       │
+│ Action: Enter or h to host this session                                 │
+╰─────────────────────────────────────────────────────────────────────────╯
+tab focus  ↑↓ move  enter actions  / filter  a all  r refresh  ? help  q quit
 ```
 
-The launcher appears only in an interactive terminal. Scripts and CI receive
-ordinary help output and should use explicit commands.
+The left panel discovers local Claude Code and Codex sessions. It starts with
+the current workspace; press `a` to include every local workspace. The right
+panel discovers shared contexts reachable over Tailscale. Both inventories
+load independently, so local browsing remains available if the tailnet is
+offline or a peer does not respond.
+
+The dashboard shows metadata only—provider, project, locator, revision, and
+timestamps. It does not render conversation content. Press `Enter` for the
+available actions, or use `h`, `t`, `f`, and `c` to host, tail, follow, or
+continue directly. The dashboard exits before handing control to the regular
+command, keeping those long-running and interactive flows predictable.
+
+The dashboard requires at least a `60x18` terminal and switches from
+side-by-side panels to a stacked layout below 100 columns. Press `?` inside it,
+or run `ctx tui --help`, for the complete key reference.
+
+Bare `ctx` opens the dashboard only in an interactive terminal. Scripts and CI
+receive ordinary help output and should continue to use explicit commands.
 
 ## Commands
 
 The stable command interface is:
 
 ```text
+ctx tui
 ctx host
 ctx host ls
 ctx ls
@@ -69,6 +83,9 @@ ctx doctor
 ctx update
 ctx completion
 ```
+
+The Unix manual page is available at [`docs/ctx.1`](docs/ctx.1) and can be
+opened from a checkout with `man ./docs/ctx.1`.
 
 ### Host
 
