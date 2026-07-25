@@ -45,14 +45,14 @@ reachable over the tailnet. Selecting an action closes the dashboard before
 running the corresponding host, tail, or continue command.
 
 Resting on a row loads a deterministic, redacted session peek without calling
-an LLM. Press v to open its paged transcript. Set CTX_NO_ANIMATION=1 to
-disable the opening animation.
+an LLM. Press v to open its full-screen transcript. Set CTX_NO_ANIMATION=1
+to disable the opening animation.
 
 Keys:
   Tab / Shift+Tab     Change focused panel
   Up / Down or j / k  Move selection
   PageUp / PageDown   Move five rows
-  v                   Open paged session transcript
+  v                   Open full-screen session transcript
   /                   Filter the focused panel
   a                   Toggle workspace/all local sessions
   r                   Refresh status and inventories
@@ -226,24 +226,26 @@ func (loader *cliTUILoader) LoadLocalPreview(
 	ctx context.Context,
 	session ctxtui.LocalSession,
 	page int,
+	pageSize int,
 ) (preview.Summary, error) {
 	info, err := os.Stat(session.Path)
 	if err != nil {
 		return preview.Summary{}, err
 	}
 	key := fmt.Sprintf(
-		"local:%s:%d:%d:page:%d",
+		"local:%s:%d:%d:page:%d:size:%d",
 		session.Path,
 		info.ModTime().UnixNano(),
 		info.Size(),
 		page,
+		pageSize,
 	)
 	return loader.loadPreview(ctx, key, func() (preview.Summary, error) {
 		file, err := source.Open(session.Path)
 		if err != nil {
 			return preview.Summary{}, err
 		}
-		return file.PreviewPageContext(ctx, page)
+		return file.PreviewPageContextSized(ctx, page, pageSize)
 	})
 }
 
@@ -251,15 +253,16 @@ func (loader *cliTUILoader) LoadSharedPreview(
 	ctx context.Context,
 	shared ctxtui.SharedContext,
 	page int,
+	pageSize int,
 ) (preview.Summary, error) {
 	digestKey := "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" + shared.Revision
-	key := fmt.Sprintf("%s:page:%d", digestKey, page)
+	key := fmt.Sprintf("%s:page:%d:size:%d", digestKey, page, pageSize)
 	return loader.loadPreview(ctx, key, func() (preview.Summary, error) {
 		digest, err := loader.loadSharedDigest(ctx, digestKey, shared)
 		if err != nil {
 			return preview.Summary{}, err
 		}
-		return preview.BuildPage(digest, page, preview.DefaultPageSize), nil
+		return preview.BuildPage(digest, page, pageSize), nil
 	})
 }
 

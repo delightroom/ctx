@@ -31,6 +31,9 @@ func (m *Model) render() string {
 	if m.showIntro {
 		return m.renderIntro()
 	}
+	if m.showTranscript {
+		return m.renderTranscriptView()
+	}
 
 	header := m.renderHeader()
 	footer := m.renderFooter()
@@ -71,9 +74,6 @@ func (m *Model) render() string {
 	}
 	if m.showActions {
 		return m.overlay(base, m.renderActionModal())
-	}
-	if m.showTranscript {
-		return m.overlay(base, m.renderTranscriptModal())
 	}
 	return base
 }
@@ -287,12 +287,7 @@ func (m *Model) renderPreviewLines(metadata ...string) []string {
 		lines = append(lines, detailLine(
 			m,
 			"History",
-			fmt.Sprintf(
-				"%d entries · page %d/%d · v inspect",
-				m.preview.TranscriptCount,
-				m.preview.TranscriptPage,
-				m.preview.TranscriptPages,
-			),
+			fmt.Sprintf("%d entries · v inspect full screen", m.preview.TranscriptCount),
 		))
 	}
 	lines = append(lines, metadata...)
@@ -377,52 +372,25 @@ func (m *Model) renderActionModal() string {
 	return m.styles.modal.Width(50).Render(strings.Join(lines, "\n"))
 }
 
-func (m *Model) renderTranscriptModal() string {
-	width := min(104, max(56, m.width-4))
-	height := min(34, max(12, m.height-4))
-	innerWidth := max(1, width-8)
-	innerHeight := max(1, height-2)
+func (m *Model) renderTranscriptView() string {
+	headerWidth := max(1, m.width-2)
+	pageLabel := transcriptPageLabel(m.preview)
+	header := m.styles.header.
+		Width(m.width).
+		Render(strings.Join([]string{
+			spreadLine(m.styles.title.Render("SESSION TRANSCRIPT"), pageLabel, headerWidth),
+			cellTruncate(m.transcriptContext(), headerWidth),
+		}, "\n"))
 
-	contextLabel := "No session selected"
-	if m.focus == localPanel {
-		if session, ok := m.selectedLocal(); ok {
-			contextLabel = fmt.Sprintf(
-				"LOCAL · %s · %s",
-				displayAgent(session.SourceAgent),
-				displayValue(session.Project, "-"),
-			)
-		}
-	} else if shared, ok := m.selectedShared(); ok {
-		contextLabel = fmt.Sprintf(
-			"SHARED · %s · %s",
-			displayLocator(shared),
-			displayAgent(shared.SourceAgent),
-		)
+	footerText := "[ / PgUp older  ·  ] / PgDn newer  ·  Home oldest  ·  End newest  ·  Esc dashboard  ·  q quit"
+	if m.width < 94 {
+		footerText = "[ older  ] newer  Home/End jump  Esc dashboard  q quit"
 	}
+	footer := m.styles.footer.Width(m.width).Render(cellTruncate(footerText, m.width))
+	bodyHeight := max(1, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
+	bodyWidth := max(1, m.width-2)
 
-	pageLabel := "NO DISPLAYABLE ENTRIES"
-	if m.preview.TranscriptPages > 0 {
-		position := ""
-		switch m.preview.TranscriptPage {
-		case 1:
-			position = " · NEWEST"
-		case m.preview.TranscriptPages:
-			position = " · OLDEST"
-		}
-		pageLabel = fmt.Sprintf(
-			"PAGE %d / %d%s · %d ENTRIES",
-			m.preview.TranscriptPage,
-			m.preview.TranscriptPages,
-			position,
-			m.preview.TranscriptCount,
-		)
-	}
-
-	lines := []string{
-		m.styles.title.Render("SESSION TRANSCRIPT"),
-		cellTruncate(contextLabel+"  ·  "+pageLabel, innerWidth),
-		"",
-	}
+	var lines []string
 	switch {
 	case m.previewLoading:
 		lines = append(lines, m.spinner.View()+" Loading transcript page...")
@@ -431,19 +399,67 @@ func (m *Model) renderTranscriptModal() string {
 	case len(m.preview.Entries) == 0:
 		lines = append(lines, m.styles.muted.Render("No displayable messages or tool activity."))
 	default:
-		entryBudget := max(1, innerHeight-5)
-		linesPerEntry := min(3, max(1, entryBudget/len(m.preview.Entries)))
 		for _, entry := range m.preview.Entries {
-			lines = append(lines, renderTranscriptEntry(entry, innerWidth, linesPerEntry)...)
+			lines = append(lines, renderTranscriptEntry(entry, bodyWidth, 1)...)
 		}
 	}
-	lines = append(
-		lines,
-		"",
-		m.styles.muted.Render("[ / PgUp older · ] / PgDn newer · Home/End jump · Esc close"),
+	body := lipgloss.NewStyle().
+		Width(m.width).
+		Height(bodyHeight).
+		Padding(0, 1).
+		Render(fitContent(lines, bodyWidth, bodyHeight))
+	content := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(content)
+}
+
+func (m *Model) transcriptContext() string {
+	if m.focus == localPanel {
+		if session, ok := m.selectedLocal(); ok {
+			return fmt.Sprintf(
+				"LOCAL · %s · %s · session %s · %s",
+				displayAgent(session.SourceAgent),
+				displayValue(session.Project, "-"),
+				displayValue(session.SessionID, "-"),
+				displayValue(session.Path, "-"),
+			)
+		}
+	} else if shared, ok := m.selectedShared(); ok {
+		return fmt.Sprintf(
+			"SHARED · %s · %s · revision %s",
+			displayLocator(shared),
+			displayAgent(shared.SourceAgent),
+			displayValue(shared.Revision, "-"),
+		)
+	}
+	return "No session selected"
+}
+
+func transcriptPageLabel(summary sessionpreview.Summary) string {
+	if summary.TranscriptPages == 0 {
+		return "NO DISPLAYABLE ENTRIES"
+	}
+	position := ""
+	switch summary.TranscriptPage {
+	case 1:
+		position = " · NEWEST"
+	case summary.TranscriptPages:
+		position = " · OLDEST"
+	}
+	return fmt.Sprintf(
+		"PAGE %d / %d%s · %d ENTRIES",
+		summary.TranscriptPage,
+		summary.TranscriptPages,
+		position,
+		summary.TranscriptCount,
 	)
-	content := fitContent(lines, innerWidth, innerHeight)
-	return m.styles.modal.Width(width).Height(height).Render(content)
+}
+
+func spreadLine(left, right string, width int) string {
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		return cellTruncate(left+" · "+right, width)
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func renderTranscriptEntry(entry sessionpreview.Entry, width, maxLines int) []string {
@@ -479,7 +495,7 @@ func (m *Model) renderHelpModal() string {
 			"Tab / Shift+Tab  focus    ↑↓ / jk       move",
 			"PgUp / PgDown   jump     /             filter",
 			"a               scope    r             refresh",
-			"v               inspect  [ / ]         transcript pages",
+			"v               full view [ / ]        transcript pages",
 			"Enter           actions  h             host",
 			"t               tail     f             follow",
 			"c               continue ? / Esc       close",
@@ -495,7 +511,7 @@ func (m *Model) renderHelpModal() string {
 			"/                   Filter the focused panel",
 			"a                   Toggle workspace/all local sessions",
 			"r                   Refresh status and inventories",
-			"v                   Open paged session transcript",
+			"v                   Open full-screen session transcript",
 			"Enter               Open available actions",
 			"h                   Host selected local session",
 			"t / f               Tail once / follow shared context",

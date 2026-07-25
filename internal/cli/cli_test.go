@@ -196,7 +196,12 @@ func TestTUILoaderBuildsAndCachesLocalPreview(t *testing.T) {
 	session := ctxtui.LocalSession{Path: path, ModifiedAt: time.Now()}
 	loader := &cliTUILoader{}
 
-	first, err := loader.LoadLocalPreview(context.Background(), session, 1)
+	first, err := loader.LoadLocalPreview(
+		context.Background(),
+		session,
+		1,
+		preview.DefaultPageSize,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +215,12 @@ func TestTUILoaderBuildsAndCachesLocalPreview(t *testing.T) {
 	if err := os.WriteFile(path, []byte(replacement+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second, err := loader.LoadLocalPreview(context.Background(), session, 1)
+	second, err := loader.LoadLocalPreview(
+		context.Background(),
+		session,
+		1,
+		preview.DefaultPageSize,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,12 +272,13 @@ func TestTUILoaderLoadsSharedPreviewFromDiscoveredOrigin(t *testing.T) {
 		Node:     "provider",
 		Revision: revision,
 		BaseURL:  server.URL,
-	}, 1)
+	}, 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if summary.CurrentRequest != "Review the payment retry 13" ||
-		summary.TranscriptPages != 3 || summary.TranscriptPage != 1 {
+		summary.TranscriptPages != 2 || summary.TranscriptPage != 1 ||
+		len(summary.Entries) != 10 {
 		t.Fatalf("summary = %+v", summary)
 	}
 	older, err := loader.LoadSharedPreview(context.Background(), ctxtui.SharedContext{
@@ -275,11 +286,11 @@ func TestTUILoaderLoadsSharedPreviewFromDiscoveredOrigin(t *testing.T) {
 		Node:     "provider",
 		Revision: revision,
 		BaseURL:  server.URL,
-	}, 2)
+	}, 2, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if older.TranscriptPage != 2 || older.Entries[0].Text != "Review the payment retry 2" {
+	if older.TranscriptPage != 2 || older.Entries[0].Text != "Review the payment retry 0" {
 		t.Fatalf("older page = %+v", older)
 	}
 	if requests.Load() != 1 {
@@ -310,6 +321,7 @@ func TestTUILoaderRejectsChangedSharedPreview(t *testing.T) {
 			BaseURL:  server.URL,
 		},
 		1,
+		preview.DefaultPageSize,
 	)
 	if err == nil || !strings.Contains(err.Error(), "changed since discovery") {
 		t.Fatalf("LoadSharedPreview error = %v", err)

@@ -25,6 +25,11 @@ install.sh
 Every archive contains one statically linked executable named `ctx`.
 `checksums.txt` is generated from the exact published archives.
 
+Release notes use GitHub's native generator. Pull requests labeled
+`enhancement`, `bug`, `documentation`, `dependencies`, or `breaking-change`
+are grouped into user-facing sections by `.github/release.yml`; unmatched pull
+requests remain visible under **Other changes**.
+
 The installer:
 
 1. detects macOS or Linux and `amd64` or `arm64`;

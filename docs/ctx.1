@@ -55,14 +55,16 @@ provider.
 .PP
 Press
 .B v
-to open the paged transcript inspector. Page 1 contains the newest history.
-Use PageUp or
+to replace the dashboard with a full-screen transcript inspector. Page 1
+contains the newest history. Each page uses the available terminal height,
+with one chronological entry per row. Use PageUp or
 .B [
 for older pages, PageDown or
 .B ]
-for newer pages, and Home or End to jump to the oldest or newest page. Each
-page contains at most six chronological entries. Tool entries expose the tool
-name and result boundary but not raw tool arguments or output.
+for newer pages, and Home or End to jump to the oldest or newest page. Escape
+returns to the dashboard. Resizing retains approximately the same position in
+history. Tool entries expose the tool name and result boundary but not raw
+tool arguments or output.
 .PP
 Preview reads are debounced, cached by the session's content version, and
 cancelled when the selection changes. The local scope defaults to the current
@@ -83,8 +85,9 @@ Move the selection.
 Move five rows.
 .TP
 .B v
-Open the selected session's paged transcript. Inside the transcript, PageUp,
-PageDown, [, ], Home, and End navigate pages; Escape closes it.
+Open the selected session's full-screen transcript. Inside the transcript,
+PageUp, PageDown, [, ], Home, and End navigate pages; Escape returns to the
+dashboard.
 .TP
 .B /
 Filter the focused panel.
