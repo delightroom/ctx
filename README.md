@@ -16,7 +16,8 @@ ctx
 The installer detects the operating system and architecture, downloads the
 matching release, verifies its SHA-256 checksum, and installs `ctx` into
 `~/.local/bin`. It does not require `sudo`. A first standalone install ends
-with the dog-and-cat string-phone welcome; updates do not replay it.
+with the dog-and-cat string-phone still plus the installed version, platform,
+standalone installation method, and binary path; updates do not replay it.
 
 Pin a release or choose an installation directory when needed:
 
@@ -49,12 +50,13 @@ ctx dev  |  TAILNET dev-laptop  |  AGENTS Claude Code + Codex
 │ SESSION PEEK                                                            │
 │ Current   Make the retry path observable without changing its behavior. │
 │ Activity  42 events · 6 you · 8 agent · 12 tool calls · Bash, Read      │
+│ History   42 entries · page 1/7 · v inspect                             │
 │ RECENT TURNS                                                            │
 │ Agent     The focused tests now pass.                                   │
 │ Workspace /work/payments                                                │
 │ Source    ~/.claude/projects/.../claude-1.jsonl                         │
 ╰─────────────────────────────────────────────────────────────────────────╯
-tab focus  ↑↓ move  enter actions  / filter  a all  r refresh  ? help  q quit
+tab focus  ↑↓ move  v inspect  enter actions  / filter  r refresh  ? help
 ```
 
 The left panel discovers local Claude Code and Codex sessions. It starts with
@@ -67,10 +69,19 @@ Rest on a session to populate `SESSION PEEK` with its current request, activity
 counts, recently used tool names, and up to four recent human/agent turns. The
 summary is deterministic and extractive: it uses the same normalized event
 parser and display redaction rules as `ctx host`, and never calls a local or
-cloud LLM. Local previews stream into fixed-size summary state; shared previews
-fetch a size-limited digest from the selected provider. Selection changes are
-debounced and obsolete reads are cancelled. Moving back to a local row checks
-the source file again; press `r` to refresh the inventories and the currently
+cloud LLM.
+
+Press `v` to open the selected session's paged transcript. Each page contains
+up to six chronological entries, with page 1 representing the newest history.
+Use `PageUp` or `[` for older pages, `PageDown` or `]` for newer pages, and
+`Home`/`End` to jump to the oldest/newest page. Local pages stream from the
+native session without retaining the complete transcript. Shared pages browse
+the bounded, revision-pinned digest already fetched from the provider.
+
+Message excerpts are redacted and terminal-safe. Tool calls show only the tool
+name; raw arguments and tool-result contents remain hidden. Preview selection
+changes are debounced and obsolete reads are cancelled. Moving back to a local
+row checks the source file again; press `r` to refresh inventories and the
 selected preview.
 
 Press `Enter` for the available actions, or use `h`, `t`, `f`, and `c` to host,
@@ -84,7 +95,7 @@ or run `ctx tui --help`, for the complete key reference.
 
 Bare `ctx` opens the dashboard only in an interactive terminal. Scripts and CI
 receive ordinary help output and should continue to use explicit commands.
-Its brief string-phone intro is skippable with any key. Set
+Its roughly two-second string-phone intro is skippable with any key. Set
 `CTX_NO_ANIMATION=1` to keep the final first-install artwork but disable motion
 in both the installer and dashboard.
 

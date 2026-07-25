@@ -72,6 +72,9 @@ func (m *Model) render() string {
 	if m.showActions {
 		return m.overlay(base, m.renderActionModal())
 	}
+	if m.showTranscript {
+		return m.overlay(base, m.renderTranscriptModal())
+	}
 	return base
 }
 
@@ -101,9 +104,9 @@ func (m *Model) renderHeader() string {
 }
 
 func (m *Model) renderFooter() string {
-	help := "tab focus  ↑↓ move  enter actions  / filter  a all  r refresh  ? help  q quit"
+	help := "tab focus  ↑↓ move  v inspect  enter actions  / filter  r refresh  ? help  q quit"
 	if m.width < 78 {
-		help = "tab focus  ↑↓ move  enter menu  / filter  ? help  q quit"
+		help = "tab focus  ↑↓ move  v inspect  enter menu  ? help  q quit"
 	}
 	if m.filtering {
 		help = "type to filter  enter apply  esc cancel"
@@ -280,6 +283,18 @@ func (m *Model) renderPreviewLines(metadata ...string) []string {
 		lines = append(lines, detailLine(m, "Current", "No user message in the visible digest."))
 	}
 	lines = append(lines, detailLine(m, "Activity", activitySummary(m.preview)))
+	if m.preview.TranscriptCount > 0 {
+		lines = append(lines, detailLine(
+			m,
+			"History",
+			fmt.Sprintf(
+				"%d entries · page %d/%d · v inspect",
+				m.preview.TranscriptCount,
+				m.preview.TranscriptPage,
+				m.preview.TranscriptPages,
+			),
+		))
+	}
 	lines = append(lines, metadata...)
 	if len(m.preview.Recent) > 0 {
 		lines = append(lines, m.styles.title.Render("RECENT TURNS"))
@@ -362,6 +377,98 @@ func (m *Model) renderActionModal() string {
 	return m.styles.modal.Width(50).Render(strings.Join(lines, "\n"))
 }
 
+func (m *Model) renderTranscriptModal() string {
+	width := min(104, max(56, m.width-4))
+	height := min(34, max(12, m.height-4))
+	innerWidth := max(1, width-8)
+	innerHeight := max(1, height-2)
+
+	contextLabel := "No session selected"
+	if m.focus == localPanel {
+		if session, ok := m.selectedLocal(); ok {
+			contextLabel = fmt.Sprintf(
+				"LOCAL · %s · %s",
+				displayAgent(session.SourceAgent),
+				displayValue(session.Project, "-"),
+			)
+		}
+	} else if shared, ok := m.selectedShared(); ok {
+		contextLabel = fmt.Sprintf(
+			"SHARED · %s · %s",
+			displayLocator(shared),
+			displayAgent(shared.SourceAgent),
+		)
+	}
+
+	pageLabel := "NO DISPLAYABLE ENTRIES"
+	if m.preview.TranscriptPages > 0 {
+		position := ""
+		switch m.preview.TranscriptPage {
+		case 1:
+			position = " · NEWEST"
+		case m.preview.TranscriptPages:
+			position = " · OLDEST"
+		}
+		pageLabel = fmt.Sprintf(
+			"PAGE %d / %d%s · %d ENTRIES",
+			m.preview.TranscriptPage,
+			m.preview.TranscriptPages,
+			position,
+			m.preview.TranscriptCount,
+		)
+	}
+
+	lines := []string{
+		m.styles.title.Render("SESSION TRANSCRIPT"),
+		cellTruncate(contextLabel+"  ·  "+pageLabel, innerWidth),
+		"",
+	}
+	switch {
+	case m.previewLoading:
+		lines = append(lines, m.spinner.View()+" Loading transcript page...")
+	case m.previewError != "":
+		lines = append(lines, m.styles.warning.Render("Preview unavailable: "+m.previewError))
+	case len(m.preview.Entries) == 0:
+		lines = append(lines, m.styles.muted.Render("No displayable messages or tool activity."))
+	default:
+		entryBudget := max(1, innerHeight-5)
+		linesPerEntry := min(3, max(1, entryBudget/len(m.preview.Entries)))
+		for _, entry := range m.preview.Entries {
+			lines = append(lines, renderTranscriptEntry(entry, innerWidth, linesPerEntry)...)
+		}
+	}
+	lines = append(
+		lines,
+		"",
+		m.styles.muted.Render("[ / PgUp older · ] / PgDn newer · Home/End jump · Esc close"),
+	)
+	content := fitContent(lines, innerWidth, innerHeight)
+	return m.styles.modal.Width(width).Height(height).Render(content)
+}
+
+func renderTranscriptEntry(entry sessionpreview.Entry, width, maxLines int) []string {
+	timestamp := "     "
+	if !entry.Timestamp.IsZero() {
+		timestamp = entry.Timestamp.Local().Format("15:04")
+	}
+	prefix := fmt.Sprintf("%5s  %-7s ", timestamp, entry.Role)
+	textWidth := max(1, width-lipgloss.Width(prefix))
+	wrapped := strings.Split(ansi.Wrap(entry.Text, textWidth, " /"), "\n")
+	if len(wrapped) > maxLines {
+		wrapped = wrapped[:maxLines]
+		wrapped[len(wrapped)-1] = ansi.Truncate(wrapped[len(wrapped)-1]+"…", textWidth, "…")
+	}
+	lines := make([]string, 0, len(wrapped))
+	for index, line := range wrapped {
+		if index == 0 {
+			lines = append(lines, prefix+line)
+		} else {
+			lines = append(lines, strings.Repeat(" ", lipgloss.Width(prefix))+line)
+		}
+	}
+	return lines
+}
+
 func (m *Model) renderHelpModal() string {
 	width := min(68, max(44, m.width-4))
 	var lines []string
@@ -372,6 +479,7 @@ func (m *Model) renderHelpModal() string {
 			"Tab / Shift+Tab  focus    ↑↓ / jk       move",
 			"PgUp / PgDown   jump     /             filter",
 			"a               scope    r             refresh",
+			"v               inspect  [ / ]         transcript pages",
 			"Enter           actions  h             host",
 			"t               tail     f             follow",
 			"c               continue ? / Esc       close",
@@ -387,6 +495,7 @@ func (m *Model) renderHelpModal() string {
 			"/                   Filter the focused panel",
 			"a                   Toggle workspace/all local sessions",
 			"r                   Refresh status and inventories",
+			"v                   Open paged session transcript",
 			"Enter               Open available actions",
 			"h                   Host selected local session",
 			"t / f               Tail once / follow shared context",

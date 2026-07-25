@@ -34,7 +34,8 @@ The installer:
 5. atomically installs `ctx`;
 6. records `standalone` as the installation method for `ctx update`;
 7. shows the string-phone welcome only when no prior installation record
-   exists.
+   exists, ending on a static frame with version, platform, standalone
+   installation method, and binary path.
 
 Set `CTX_NO_ANIMATION=1` to render the final first-install artwork without
 motion. Non-interactive and `TERM=dumb` installs also use the static form.

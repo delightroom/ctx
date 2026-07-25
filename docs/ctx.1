@@ -53,13 +53,24 @@ LLM. Local previews stream from the selected session file into fixed-size
 summary state. Shared previews fetch a size-limited digest from the selected
 provider.
 .PP
+Press
+.B v
+to open the paged transcript inspector. Page 1 contains the newest history.
+Use PageUp or
+.B [
+for older pages, PageDown or
+.B ]
+for newer pages, and Home or End to jump to the oldest or newest page. Each
+page contains at most six chronological entries. Tool entries expose the tool
+name and result boundary but not raw tool arguments or output.
+.PP
 Preview reads are debounced, cached by the session's content version, and
 cancelled when the selection changes. The local scope defaults to the current
 workspace. The layout is side by side at 100 columns or wider, stacked below
 100 columns, and requires at least a 60 by 18 terminal.
 .PP
-The dashboard opens with a brief dog-and-cat string-phone animation. Press any
-key to skip it.
+The dashboard opens with a roughly two-second dog-and-cat string-phone
+animation. Press any key to skip it.
 .SS Keys
 .TP
 .B Tab, Shift\-Tab
@@ -70,6 +81,10 @@ Move the selection.
 .TP
 .B PageUp, PageDown
 Move five rows.
+.TP
+.B v
+Open the selected session's paged transcript. Inside the transcript, PageUp,
+PageDown, [, ], Home, and End navigate pages; Escape closes it.
 .TP
 .B /
 Filter the focused panel.
@@ -108,7 +123,8 @@ flow.
 .TP
 .B CTX_NO_ANIMATION
 When non-empty, disable motion in the dashboard and standalone installer. The
-installer still prints the final static welcome on the first install.
+installer still prints the final static welcome with installation metadata on
+the first install.
 .SH COMMANDS
 .TP
 .B tui

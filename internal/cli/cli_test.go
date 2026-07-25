@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -195,7 +196,7 @@ func TestTUILoaderBuildsAndCachesLocalPreview(t *testing.T) {
 	session := ctxtui.LocalSession{Path: path, ModifiedAt: time.Now()}
 	loader := &cliTUILoader{}
 
-	first, err := loader.LoadLocalPreview(context.Background(), session)
+	first, err := loader.LoadLocalPreview(context.Background(), session, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +210,7 @@ func TestTUILoaderBuildsAndCachesLocalPreview(t *testing.T) {
 	if err := os.WriteFile(path, []byte(replacement+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second, err := loader.LoadLocalPreview(context.Background(), session)
+	second, err := loader.LoadLocalPreview(context.Background(), session, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,10 +223,20 @@ func TestTUILoaderBuildsAndCachesLocalPreview(t *testing.T) {
 
 func TestTUILoaderLoadsSharedPreviewFromDiscoveredOrigin(t *testing.T) {
 	const revision = "abc123"
+	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
 		if request.URL.Path != "/v1/feeds/payments/digest" {
 			http.NotFound(response, request)
 			return
+		}
+		events := make([]protocol.Event, 14)
+		for index := range events {
+			events[index] = protocol.Event{
+				Role: "user",
+				Kind: "message",
+				Text: fmt.Sprintf("Review the payment retry %d", index),
+			}
 		}
 		response.Header().Set("ETag", `"`+revision+`"`)
 		_ = json.NewEncoder(response).Encode(protocol.Digest{
@@ -235,11 +246,7 @@ func TestTUILoaderLoadsSharedPreviewFromDiscoveredOrigin(t *testing.T) {
 				Node:            "provider",
 				Revision:        revision,
 			},
-			Events: []protocol.Event{{
-				Role: "user",
-				Kind: "message",
-				Text: "Review the payment retry",
-			}},
+			Events: events,
 		})
 	}))
 	defer server.Close()
@@ -255,12 +262,28 @@ func TestTUILoaderLoadsSharedPreviewFromDiscoveredOrigin(t *testing.T) {
 		Node:     "provider",
 		Revision: revision,
 		BaseURL:  server.URL,
-	})
+	}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.CurrentRequest != "Review the payment retry" {
+	if summary.CurrentRequest != "Review the payment retry 13" ||
+		summary.TranscriptPages != 3 || summary.TranscriptPage != 1 {
 		t.Fatalf("summary = %+v", summary)
+	}
+	older, err := loader.LoadSharedPreview(context.Background(), ctxtui.SharedContext{
+		Name:     "payments",
+		Node:     "provider",
+		Revision: revision,
+		BaseURL:  server.URL,
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.TranscriptPage != 2 || older.Entries[0].Text != "Review the payment retry 2" {
+		t.Fatalf("older page = %+v", older)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("digest requests = %d, want one cached request", requests.Load())
 	}
 }
 
@@ -286,6 +309,7 @@ func TestTUILoaderRejectsChangedSharedPreview(t *testing.T) {
 			Revision: "discovered-revision",
 			BaseURL:  server.URL,
 		},
+		1,
 	)
 	if err == nil || !strings.Contains(err.Error(), "changed since discovery") {
 		t.Fatalf("LoadSharedPreview error = %v", err)

@@ -41,6 +41,9 @@ print_ctx_art() {
 }
 
 show_first_install_art() {
+  installed_version=$1
+  installed_platform=$2
+  installed_path=$3
   if [ -t 1 ] &&
     [ "${TERM:-dumb}" != "dumb" ] &&
     [ -z "${CTX_NO_ANIMATION:-}" ] &&
@@ -59,6 +62,8 @@ show_first_install_art() {
     printf '\033[8A'
   fi
   print_ctx_art "connected" "connected" "-------o--------"
+  printf '             ctx %s · %s · standalone\n' "$installed_version" "$installed_platform"
+  printf '             binary  %s\n' "$installed_path"
 }
 
 download() {
@@ -234,7 +239,7 @@ append_path "$canonical_install_dir"
 
 if [ "$first_install" -eq 1 ]; then
   printf '\n'
-  show_first_install_art
+  show_first_install_art "$release_version" "${target_os}/${target_arch}" "$install_path"
 fi
 printf '\n%s\n' "ctx is ready."
 case ":${PATH:-}:" in

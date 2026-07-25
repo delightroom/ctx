@@ -45,12 +45,14 @@ reachable over the tailnet. Selecting an action closes the dashboard before
 running the corresponding host, tail, or continue command.
 
 Resting on a row loads a deterministic, redacted session peek without calling
-an LLM. Set CTX_NO_ANIMATION=1 to disable the opening animation.
+an LLM. Press v to open its paged transcript. Set CTX_NO_ANIMATION=1 to
+disable the opening animation.
 
 Keys:
   Tab / Shift+Tab     Change focused panel
   Up / Down or j / k  Move selection
   PageUp / PageDown   Move five rows
+  v                   Open paged session transcript
   /                   Filter the focused panel
   a                   Toggle workspace/all local sessions
   r                   Refresh status and inventories
@@ -118,9 +120,14 @@ type cliTUILoader struct {
 	previewMu   sync.Mutex
 	previews    map[string]preview.Summary
 	previewKeys []string
+	digests     map[string]protocol.Digest
+	digestKeys  []string
 }
 
-const maxPreviewCacheEntries = 64
+const (
+	maxPreviewCacheEntries = 64
+	maxDigestCacheEntries  = 16
+)
 
 func (loader *cliTUILoader) LoadStatus(ctx context.Context) (ctxtui.Status, error) {
 	status := ctxtui.Status{Agents: installedAgents()}
@@ -218,66 +225,110 @@ func (loader *cliTUILoader) LoadShared(ctx context.Context) ([]ctxtui.SharedCont
 func (loader *cliTUILoader) LoadLocalPreview(
 	ctx context.Context,
 	session ctxtui.LocalSession,
+	page int,
 ) (preview.Summary, error) {
 	info, err := os.Stat(session.Path)
 	if err != nil {
 		return preview.Summary{}, err
 	}
 	key := fmt.Sprintf(
-		"local:%s:%d:%d",
+		"local:%s:%d:%d:page:%d",
 		session.Path,
 		info.ModTime().UnixNano(),
 		info.Size(),
+		page,
 	)
 	return loader.loadPreview(ctx, key, func() (preview.Summary, error) {
 		file, err := source.Open(session.Path)
 		if err != nil {
 			return preview.Summary{}, err
 		}
-		return file.PreviewContext(ctx)
+		return file.PreviewPageContext(ctx, page)
 	})
 }
 
 func (loader *cliTUILoader) LoadSharedPreview(
 	ctx context.Context,
 	shared ctxtui.SharedContext,
+	page int,
 ) (preview.Summary, error) {
-	key := "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" + shared.Revision
+	digestKey := "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" + shared.Revision
+	key := fmt.Sprintf("%s:page:%d", digestKey, page)
 	return loader.loadPreview(ctx, key, func() (preview.Summary, error) {
-		if shared.BaseURL == "" {
-			return preview.Summary{}, errors.New("shared context origin is unavailable; press r to refresh")
-		}
-		if shared.Revision == "" {
-			return preview.Summary{}, errors.New("shared context revision is unavailable; press r to refresh")
-		}
-		requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		digest, revision, err := ctxclient.New(5*time.Second).Digest(
-			requestCtx,
-			shared.BaseURL,
-			shared.Name,
-			"",
-		)
+		digest, err := loader.loadSharedDigest(ctx, digestKey, shared)
 		if err != nil {
 			return preview.Summary{}, err
 		}
-		if digest.Manifest.ProtocolVersion != protocol.Version {
-			return preview.Summary{}, fmt.Errorf(
-				"unsupported protocol version %q",
-				digest.Manifest.ProtocolVersion,
-			)
-		}
-		if digest.Manifest.Name != shared.Name || digest.Manifest.Node != shared.Node {
-			return preview.Summary{}, errors.New("shared context identity changed; press r to refresh")
-		}
-		if revision == "" || digest.Manifest.Revision != revision {
-			return preview.Summary{}, errors.New("shared context returned an inconsistent revision")
-		}
-		if revision != shared.Revision {
-			return preview.Summary{}, errors.New("shared context changed since discovery; press r to refresh")
-		}
-		return preview.Build(digest), nil
+		return preview.BuildPage(digest, page, preview.DefaultPageSize), nil
 	})
+}
+
+func (loader *cliTUILoader) loadSharedDigest(
+	ctx context.Context,
+	key string,
+	shared ctxtui.SharedContext,
+) (protocol.Digest, error) {
+	if err := ctx.Err(); err != nil {
+		return protocol.Digest{}, err
+	}
+	loader.previewMu.Lock()
+	cached, ok := loader.digests[key]
+	loader.previewMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	if shared.BaseURL == "" {
+		return protocol.Digest{}, errors.New("shared context origin is unavailable; press r to refresh")
+	}
+	if shared.Revision == "" {
+		return protocol.Digest{}, errors.New("shared context revision is unavailable; press r to refresh")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	digest, revision, err := ctxclient.New(5*time.Second).Digest(
+		requestCtx,
+		shared.BaseURL,
+		shared.Name,
+		"",
+	)
+	if err != nil {
+		return protocol.Digest{}, err
+	}
+	if digest.Manifest.ProtocolVersion != protocol.Version {
+		return protocol.Digest{}, fmt.Errorf(
+			"unsupported protocol version %q",
+			digest.Manifest.ProtocolVersion,
+		)
+	}
+	if digest.Manifest.Name != shared.Name || digest.Manifest.Node != shared.Node {
+		return protocol.Digest{}, errors.New("shared context identity changed; press r to refresh")
+	}
+	if revision == "" || digest.Manifest.Revision != revision {
+		return protocol.Digest{}, errors.New("shared context returned an inconsistent revision")
+	}
+	if revision != shared.Revision {
+		return protocol.Digest{}, errors.New("shared context changed since discovery; press r to refresh")
+	}
+	if err := ctx.Err(); err != nil {
+		return protocol.Digest{}, err
+	}
+
+	loader.previewMu.Lock()
+	if loader.digests == nil {
+		loader.digests = make(map[string]protocol.Digest)
+	}
+	if _, exists := loader.digests[key]; !exists {
+		if len(loader.digestKeys) == maxDigestCacheEntries {
+			delete(loader.digests, loader.digestKeys[0])
+			copy(loader.digestKeys, loader.digestKeys[1:])
+			loader.digestKeys = loader.digestKeys[:len(loader.digestKeys)-1]
+		}
+		loader.digestKeys = append(loader.digestKeys, key)
+	}
+	loader.digests[key] = digest
+	loader.previewMu.Unlock()
+	return digest, nil
 }
 
 func (loader *cliTUILoader) loadPreview(

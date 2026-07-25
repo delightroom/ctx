@@ -8,7 +8,9 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const introFrameDelay = 90 * time.Millisecond
+// Nine frames at 200 ms make the exchange readable (~1.8 s total) while any
+// key still skips it immediately.
+const introFrameDelay = 200 * time.Millisecond
 
 var introFrames = []struct {
 	dog    string

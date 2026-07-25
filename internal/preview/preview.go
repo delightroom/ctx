@@ -2,6 +2,7 @@ package preview
 
 import (
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -14,6 +15,11 @@ const (
 	maxTextRunes = 640
 	recentLimit  = 4
 	toolLimit    = 4
+
+	// DefaultPageSize keeps transcript pages useful in compact terminals while
+	// bounding the amount of display text retained by each cached preview.
+	DefaultPageSize = 6
+	maxPageSize     = 50
 )
 
 type Turn struct {
@@ -21,15 +27,26 @@ type Turn struct {
 	Text string
 }
 
+type Entry struct {
+	Timestamp time.Time
+	Role      string
+	Kind      string
+	Text      string
+}
+
 type Summary struct {
-	CurrentRequest string
-	Recent         []Turn
-	Tools          []string
-	EventCount     int
-	UserTurns      int
-	AgentTurns     int
-	ToolCalls      int
-	Truncated      bool
+	CurrentRequest  string
+	Recent          []Turn
+	Tools           []string
+	EventCount      int
+	UserTurns       int
+	AgentTurns      int
+	ToolCalls       int
+	Truncated       bool
+	Entries         []Entry
+	TranscriptPage  int
+	TranscriptPages int
+	TranscriptCount int
 }
 
 // Accumulator creates a preview while retaining only the fields the UI can
@@ -96,11 +113,121 @@ func (a *Accumulator) Summary(truncated bool) Summary {
 // Build creates a small, deterministic description of a normalized digest.
 // It deliberately uses only extractive signals and never calls an LLM.
 func Build(digest protocol.Digest) Summary {
+	return BuildPage(digest, 1, DefaultPageSize)
+}
+
+// BuildPage adds one newest-first transcript page to the bounded summary.
+func BuildPage(digest protocol.Digest, page, pageSize int) Summary {
 	var accumulator Accumulator
+	total := 0
 	for _, event := range digest.Events {
 		accumulator.Add(event)
+		if _, ok := EntryFromEvent(event); ok {
+			total++
+		}
 	}
-	return accumulator.Summary(digest.Manifest.Truncated)
+	summary := accumulator.Summary(digest.Manifest.Truncated)
+	number, pages, start, end := PageBounds(total, page, pageSize)
+	entries := make([]Entry, 0, end-start)
+	index := 0
+	for _, event := range digest.Events {
+		entry, ok := EntryFromEvent(event)
+		if !ok {
+			continue
+		}
+		if index >= start && index < end {
+			entries = append(entries, entry)
+		}
+		index++
+		if index == end {
+			break
+		}
+	}
+	return AttachPage(summary, entries, total, number, pages)
+}
+
+// EntryFromEvent converts normalized history into safe transcript metadata.
+// Tool payloads and results are deliberately represented without their text.
+func EntryFromEvent(event protocol.Event) (Entry, bool) {
+	entry := Entry{
+		Timestamp: event.Timestamp,
+		Kind:      event.Kind,
+	}
+	switch event.Kind {
+	case "message":
+		entry.Text = Sanitize(event.Text)
+		if entry.Text == "" {
+			return Entry{}, false
+		}
+		switch event.Role {
+		case "user":
+			entry.Role = "You"
+		case "assistant":
+			entry.Role = "Agent"
+		case "system", "developer":
+			entry.Role = "System"
+		default:
+			entry.Role = "Message"
+		}
+	case "tool_call":
+		entry.Role = "Tool"
+		tool := Sanitize(event.ToolName)
+		if tool == "" {
+			tool = "unknown"
+		}
+		entry.Text = "Called " + tool
+	case "tool_result":
+		entry.Role = "Tool"
+		entry.Text = "Result returned"
+	case "omission":
+		entry.Role = "System"
+		entry.Text = Sanitize(event.Text)
+		if entry.Text == "" {
+			entry.Text = "Earlier events omitted"
+		}
+	default:
+		return Entry{}, false
+	}
+	return entry, true
+}
+
+// PageBounds returns a newest-first page and its half-open chronological
+// bounds. Page 1 contains the newest entries, ordered oldest-to-newest.
+func PageBounds(total, requested, pageSize int) (page, pages, start, end int) {
+	pageSize = clampPageSize(pageSize)
+	if total <= 0 {
+		return 0, 0, 0, 0
+	}
+	pages = (total + pageSize - 1) / pageSize
+	page = requested
+	if page < 1 {
+		page = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	end = max(0, total-(page-1)*pageSize)
+	start = max(0, end-pageSize)
+	return page, pages, start, end
+}
+
+func AttachPage(
+	summary Summary,
+	entries []Entry,
+	total, page, pages int,
+) Summary {
+	summary.Entries = append([]Entry(nil), entries...)
+	summary.TranscriptCount = total
+	summary.TranscriptPage = page
+	summary.TranscriptPages = pages
+	return summary
+}
+
+func clampPageSize(value int) int {
+	if value < 1 {
+		return DefaultPageSize
+	}
+	return min(value, maxPageSize)
 }
 
 // Sanitize prepares untrusted session-derived text for one-line terminal use.
