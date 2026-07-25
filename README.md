@@ -50,7 +50,7 @@ ctx dev  |  TAILNET dev-laptop  |  AGENTS Claude Code + Codex
 │ SESSION PEEK                                                            │
 │ Current   Make the retry path observable without changing its behavior. │
 │ Activity  42 events · 6 you · 8 agent · 12 tool calls · Bash, Read      │
-│ History   42 entries · page 1/7 · v inspect                             │
+│ History   42 entries · v inspect full screen                            │
 │ RECENT TURNS                                                            │
 │ Agent     The focused tests now pass.                                   │
 │ Workspace /work/payments                                                │
@@ -71,10 +71,12 @@ summary is deterministic and extractive: it uses the same normalized event
 parser and display redaction rules as `ctx host`, and never calls a local or
 cloud LLM.
 
-Press `v` to open the selected session's paged transcript. Each page contains
-up to six chronological entries, with page 1 representing the newest history.
-Use `PageUp` or `[` for older pages, `PageDown` or `]` for newer pages, and
-`Home`/`End` to jump to the oldest/newest page. Local pages stream from the
+Press `v` to replace the dashboard with the selected session's full-screen
+transcript. A page uses the terminal's available height, with one chronological
+entry per row and page 1 representing the newest history. Use `PageUp` or `[`
+for older pages, `PageDown` or `]` for newer pages, and `Home`/`End` to jump to
+the oldest/newest page. `Esc` returns to the dashboard. Resizing the terminal
+keeps approximately the same position in history. Local pages stream from the
 native session without retaining the complete transcript. Shared pages browse
 the bounded, revision-pinned digest already fetched from the provider.
 

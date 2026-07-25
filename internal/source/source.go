@@ -204,6 +204,16 @@ func (f *File) PreviewContext(ctx context.Context) (preview.Summary, error) {
 // PreviewPageContext returns one newest-first transcript page while retaining
 // only the summary, the newest page, and the requested page in memory.
 func (f *File) PreviewPageContext(ctx context.Context, requestedPage int) (preview.Summary, error) {
+	return f.PreviewPageContextSized(ctx, requestedPage, preview.DefaultPageSize)
+}
+
+// PreviewPageContextSized returns a caller-sized transcript page while
+// retaining only bounded display entries in memory.
+func (f *File) PreviewPageContextSized(
+	ctx context.Context,
+	requestedPage int,
+	requestedPageSize int,
+) (preview.Summary, error) {
 	if err := contextError(ctx); err != nil {
 		return preview.Summary{}, err
 	}
@@ -215,7 +225,9 @@ func (f *File) PreviewPageContext(ctx context.Context, requestedPage int) (previ
 
 	var accumulator preview.Accumulator
 	total := 0
-	newest := make([]preview.Entry, 0, preview.DefaultPageSize)
+	pageSize := preview.EffectivePageSize(requestedPageSize)
+	newest := make([]preview.Entry, 0, pageSize)
+	newestStart := 0
 	err = f.scanPreviewEvents(ctx, handle, func(event protocol.Event) bool {
 		accumulator.Add(event)
 		entry, ok := preview.EntryFromEvent(event)
@@ -223,9 +235,9 @@ func (f *File) PreviewPageContext(ctx context.Context, requestedPage int) (previ
 			return true
 		}
 		total++
-		if len(newest) == preview.DefaultPageSize {
-			copy(newest, newest[1:])
-			newest[len(newest)-1] = entry
+		if len(newest) == pageSize {
+			newest[newestStart] = entry
+			newestStart = (newestStart + 1) % pageSize
 		} else {
 			newest = append(newest, entry)
 		}
@@ -238,9 +250,14 @@ func (f *File) PreviewPageContext(ctx context.Context, requestedPage int) (previ
 	page, pages, start, end := preview.PageBounds(
 		total,
 		requestedPage,
-		preview.DefaultPageSize,
+		pageSize,
 	)
 	entries := newest
+	if len(newest) == pageSize && newestStart > 0 {
+		entries = make([]preview.Entry, 0, pageSize)
+		entries = append(entries, newest[newestStart:]...)
+		entries = append(entries, newest[:newestStart]...)
+	}
 	if page > 1 {
 		if _, err := handle.Seek(0, io.SeekStart); err != nil {
 			return preview.Summary{}, err

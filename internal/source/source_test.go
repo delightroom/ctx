@@ -137,6 +137,10 @@ func TestPreviewContextStreamsFullSessionIntoBoundedSummary(t *testing.T) {
 		summary.TranscriptCount != 102 || len(summary.Entries) != preview.DefaultPageSize {
 		t.Fatalf("summary = %+v", summary)
 	}
+	if summary.Entries[0].Text != "Called tool-r" ||
+		summary.Entries[len(summary.Entries)-1].Text != "current request" {
+		t.Fatalf("newest entries = %+v", summary.Entries)
+	}
 }
 
 func TestPreviewPageContextReadsOlderTranscriptPage(t *testing.T) {
@@ -163,6 +167,43 @@ func TestPreviewPageContextReadsOlderTranscriptPage(t *testing.T) {
 	}
 	if page.Entries[0].Text != "message-c" ||
 		page.Entries[len(page.Entries)-1].Text != "message-h" {
+		t.Fatalf("entries = %+v", page.Entries)
+	}
+}
+
+func TestPreviewPageContextSizedUsesRequestedBoundedPage(t *testing.T) {
+	var lines []string
+	for index := range 24 {
+		lines = append(lines,
+			`{"type":"user","sessionId":"claude-1","cwd":"/work/payments","message":{"role":"user","content":"message-`+
+				string(rune('a'+index))+`"}}`,
+		)
+	}
+	path := writeFixture(t, "sized-preview.jsonl", strings.Join(lines, "\n"))
+	session, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newest, err := session.PreviewPageContextSized(context.Background(), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newest.Entries[0].Text != "message-o" ||
+		newest.Entries[len(newest.Entries)-1].Text != "message-x" {
+		t.Fatalf("newest entries = %+v", newest.Entries)
+	}
+
+	page, err := session.PreviewPageContextSized(context.Background(), 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.TranscriptPage != 2 || page.TranscriptPages != 3 ||
+		page.TranscriptCount != 24 || len(page.Entries) != 10 {
+		t.Fatalf("page = %+v", page)
+	}
+	if page.Entries[0].Text != "message-e" ||
+		page.Entries[len(page.Entries)-1].Text != "message-n" {
 		t.Fatalf("entries = %+v", page.Entries)
 	}
 }

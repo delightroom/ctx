@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -80,7 +81,7 @@ func TestRenderSessionPeek(t *testing.T) {
 		"SESSION PEEK",
 		"Current   Improve the session details",
 		"42 events · 6 you · 8 agent · 12 tool calls · Bash, Edit, Read",
-		"14 entries · page 1/3 · v inspect",
+		"14 entries · v inspect full screen",
 		"RECENT TURNS",
 		"You       Can we make the metadata useful?",
 		"Agent     I am adding an extractive summary.",
@@ -92,11 +93,11 @@ func TestRenderSessionPeek(t *testing.T) {
 	}
 }
 
-func TestTranscriptModalRendersAndPaginates(t *testing.T) {
+func TestTranscriptViewUsesFullScreenAndPaginates(t *testing.T) {
 	model := readyModel()
 	model.width = 80
 	model.height = 24
-	model.previewKey = "local:/sessions/claude.jsonl:page:1"
+	model.previewKey = "local:/sessions/claude.jsonl:page:1:size:6"
 	model.previewPage = 1
 	model.preview = preview.Summary{
 		CurrentRequest:  "Inspect more history",
@@ -105,15 +106,33 @@ func TestTranscriptModalRendersAndPaginates(t *testing.T) {
 		TranscriptCount: 14,
 		Entries: []preview.Entry{
 			{Role: "You", Kind: "message", Text: "Please inspect the queue retry behavior in more detail."},
-			{Role: "Tool", Kind: "tool_call", Text: "Called Bash"},
-			{Role: "Tool", Kind: "tool_result", Text: "Result returned"},
-			{Role: "Agent", Kind: "message", Text: "The retry path is bounded and observable."},
 		},
 	}
 
 	command, handled := model.handleKey("v")
-	if !handled || command != nil || !model.showTranscript {
+	if !handled || command == nil || !model.showTranscript || !model.previewLoading {
 		t.Fatalf("transcript did not open: handled=%v command=%v show=%v", handled, command, model.showTranscript)
+	}
+	target, ok := model.selectedPreviewTarget()
+	if !ok || target.pageSize != 21 {
+		t.Fatalf("full-screen target = %+v, ok=%v", target, ok)
+	}
+
+	entries := make([]preview.Entry, 21)
+	for index := range entries {
+		entries[index] = preview.Entry{
+			Role: "Agent",
+			Kind: "message",
+			Text: fmt.Sprintf("entry-%02d describes the session work", index),
+		}
+	}
+	model.previewLoading = false
+	model.previewKey = target.key
+	model.preview = preview.Summary{
+		TranscriptPage:  1,
+		TranscriptPages: 2,
+		TranscriptCount: 42,
+		Entries:         entries,
 	}
 	rendered := model.render()
 	if lipgloss.Width(rendered) != 80 || lipgloss.Height(rendered) != 24 {
@@ -122,14 +141,18 @@ func TestTranscriptModalRendersAndPaginates(t *testing.T) {
 	plain := stripANSI(rendered)
 	for _, want := range []string{
 		"SESSION TRANSCRIPT",
-		"PAGE 1 / 3 · NEWEST · 14 ENTRIES",
-		"Please inspect the queue retry behavior",
-		"Called Bash",
-		"PgUp older",
+		"PAGE 1 / 2 · NEWEST · 42 ENTRIES",
+		"session claude-1",
+		"entry-00 describes the session work",
+		"entry-20 describes the session work",
+		"Esc dashboard",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("transcript lacks %q:\n%s", want, plain)
 		}
+	}
+	if strings.Contains(plain, "LOCAL SESSIONS") || strings.Contains(plain, "SHARED CONTEXTS") {
+		t.Fatalf("dashboard leaked behind full-screen transcript:\n%s", plain)
 	}
 
 	command, handled = model.handleKey("[")
@@ -140,18 +163,46 @@ func TestTranscriptModalRendersAndPaginates(t *testing.T) {
 	if !model.showTranscript {
 		t.Fatal("transcript closed while changing pages")
 	}
-	if model.preview.TranscriptPage != 2 || model.preview.TranscriptPages != 3 ||
-		model.preview.TranscriptCount != 14 {
+	if model.preview.TranscriptPage != 2 || model.preview.TranscriptPages != 2 ||
+		model.preview.TranscriptCount != 42 {
 		t.Fatalf("loading page metadata = page %d/%d, count %d",
 			model.preview.TranscriptPage, model.preview.TranscriptPages, model.preview.TranscriptCount)
 	}
-	if rendered = stripANSI(model.render()); !strings.Contains(rendered, "PAGE 2 / 3") ||
+	if rendered = stripANSI(model.render()); !strings.Contains(rendered, "PAGE 2 / 2 · OLDEST") ||
 		!strings.Contains(rendered, "Loading transcript page") {
 		t.Fatalf("loading transcript lost page context:\n%s", rendered)
 	}
 	model.handleKey("esc")
 	if model.showTranscript {
 		t.Fatal("escape did not close transcript")
+	}
+	if rendered = stripANSI(model.render()); !strings.Contains(rendered, "LOCAL SESSIONS") {
+		t.Fatalf("escape did not restore dashboard:\n%s", rendered)
+	}
+}
+
+func TestTranscriptResizeKeepsApproximateHistoryPosition(t *testing.T) {
+	model := readyModel()
+	model.width = 80
+	model.height = 24
+	model.showTranscript = true
+	model.previewPage = 3
+	model.previewKey = "local:/sessions/claude.jsonl:page:3:size:21"
+	model.preview = preview.Summary{
+		TranscriptPage:  3,
+		TranscriptPages: 48,
+		TranscriptCount: 1000,
+		Entries:         []preview.Entry{{Role: "Agent", Text: "current page"}},
+	}
+
+	_, command := model.Update(tea.WindowSizeMsg{Width: 80, Height: 34})
+	if command == nil || model.previewPage != 2 || !model.previewLoading {
+		t.Fatalf("resize state = page %d, loading=%v, command=%v",
+			model.previewPage, model.previewLoading, command)
+	}
+	target, ok := model.selectedPreviewTarget()
+	if !ok || target.pageSize != 31 {
+		t.Fatalf("resized target = %+v, ok=%v", target, ok)
 	}
 }
 
@@ -409,8 +460,9 @@ func TestScopeReloadRestartsOnlyStoppedSpinner(t *testing.T) {
 }
 
 type fakeLoader struct {
-	loadedAll   bool
-	previewPage int
+	loadedAll       bool
+	previewPage     int
+	previewPageSize int
 }
 
 func (loader *fakeLoader) LoadStatus(context.Context) (Status, error) {
@@ -426,13 +478,25 @@ func (loader *fakeLoader) LoadShared(context.Context) ([]SharedContext, error) {
 	return nil, nil
 }
 
-func (loader *fakeLoader) LoadLocalPreview(_ context.Context, _ LocalSession, page int) (preview.Summary, error) {
+func (loader *fakeLoader) LoadLocalPreview(
+	_ context.Context,
+	_ LocalSession,
+	page int,
+	pageSize int,
+) (preview.Summary, error) {
 	loader.previewPage = page
+	loader.previewPageSize = pageSize
 	return preview.Summary{}, nil
 }
 
-func (loader *fakeLoader) LoadSharedPreview(_ context.Context, _ SharedContext, page int) (preview.Summary, error) {
+func (loader *fakeLoader) LoadSharedPreview(
+	_ context.Context,
+	_ SharedContext,
+	page int,
+	pageSize int,
+) (preview.Summary, error) {
 	loader.previewPage = page
+	loader.previewPageSize = pageSize
 	return preview.Summary{}, nil
 }
 

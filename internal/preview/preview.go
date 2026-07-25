@@ -19,7 +19,7 @@ const (
 	// DefaultPageSize keeps transcript pages useful in compact terminals while
 	// bounding the amount of display text retained by each cached preview.
 	DefaultPageSize = 6
-	maxPageSize     = 50
+	maxPageSize     = 100
 )
 
 type Turn struct {
@@ -194,7 +194,7 @@ func EntryFromEvent(event protocol.Event) (Entry, bool) {
 // PageBounds returns a newest-first page and its half-open chronological
 // bounds. Page 1 contains the newest entries, ordered oldest-to-newest.
 func PageBounds(total, requested, pageSize int) (page, pages, start, end int) {
-	pageSize = clampPageSize(pageSize)
+	pageSize = EffectivePageSize(pageSize)
 	if total <= 0 {
 		return 0, 0, 0, 0
 	}
@@ -223,7 +223,9 @@ func AttachPage(
 	return summary
 }
 
-func clampPageSize(value int) int {
+// EffectivePageSize normalizes caller-provided page sizes to the preview's
+// bounded retention limits.
+func EffectivePageSize(value int) int {
 	if value < 1 {
 		return DefaultPageSize
 	}

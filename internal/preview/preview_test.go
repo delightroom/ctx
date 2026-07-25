@@ -123,6 +123,15 @@ func TestBuildPagePaginatesTranscriptNewestFirst(t *testing.T) {
 	}
 }
 
+func TestEffectivePageSizeStaysBounded(t *testing.T) {
+	if got := EffectivePageSize(0); got != DefaultPageSize {
+		t.Fatalf("zero page size = %d, want %d", got, DefaultPageSize)
+	}
+	if got := EffectivePageSize(1_000); got != maxPageSize {
+		t.Fatalf("large page size = %d, want %d", got, maxPageSize)
+	}
+}
+
 func TestTranscriptEntriesHideToolPayloadsAndResults(t *testing.T) {
 	result := BuildPage(protocol.Digest{Events: []protocol.Event{
 		{

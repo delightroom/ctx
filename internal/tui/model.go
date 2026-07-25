@@ -64,8 +64,8 @@ type Loader interface {
 	LoadStatus(context.Context) (Status, error)
 	LoadLocal(context.Context, bool) ([]LocalSession, error)
 	LoadShared(context.Context) ([]SharedContext, error)
-	LoadLocalPreview(context.Context, LocalSession, int) (sessionpreview.Summary, error)
-	LoadSharedPreview(context.Context, SharedContext, int) (sessionpreview.Summary, error)
+	LoadLocalPreview(context.Context, LocalSession, int, int) (sessionpreview.Summary, error)
+	LoadSharedPreview(context.Context, SharedContext, int, int) (sessionpreview.Summary, error)
 }
 
 type Config struct {
@@ -109,10 +109,11 @@ type sharedLoadedMsg struct {
 }
 
 type previewTarget struct {
-	key    string
-	page   int
-	local  *LocalSession
-	shared *SharedContext
+	key      string
+	page     int
+	pageSize int
+	local    *LocalSession
+	shared   *SharedContext
 }
 
 type previewDebounceMsg struct {
@@ -265,9 +266,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
+		previousPageSize := m.transcriptPageSize()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeFilter()
+		if m.showTranscript {
+			pageSize := m.transcriptPageSize()
+			if pageSize != previousPageSize {
+				offset := max(0, m.previewPage-1) * previousPageSize
+				m.previewPage = offset/pageSize + 1
+				commands = append(commands, m.schedulePreview())
+			}
+		}
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
 		m.styles = newStyles(m.dark)
@@ -445,7 +455,7 @@ func (m *Model) handleKey(key string) (tea.Cmd, bool) {
 	case "r":
 		return m.refresh(), true
 	case "v":
-		m.openTranscript()
+		return m.openTranscript(), true
 	case "enter":
 		m.openActions()
 	case "h":
@@ -486,7 +496,7 @@ func (m *Model) handleTranscriptKey(key string) tea.Cmd {
 	return nil
 }
 
-func (m *Model) openTranscript() {
+func (m *Model) openTranscript() tea.Cmd {
 	switch {
 	case m.previewLoading:
 		m.notice = "The selected transcript is still loading."
@@ -497,7 +507,9 @@ func (m *Model) openTranscript() {
 	default:
 		m.showTranscript = true
 		m.notice = ""
+		return m.schedulePreview()
 	}
+	return nil
 }
 
 func (m *Model) requestPreviewPage(page int) tea.Cmd {
@@ -699,9 +711,17 @@ func (m *Model) schedulePreview() tea.Cmd {
 	m.previewKey = target.key
 	loadingPreview := sessionpreview.Summary{}
 	if m.showTranscript {
+		page, pages, _, _ := sessionpreview.PageBounds(
+			m.preview.TranscriptCount,
+			target.page,
+			target.pageSize,
+		)
 		loadingPreview.TranscriptCount = m.preview.TranscriptCount
-		loadingPreview.TranscriptPages = m.preview.TranscriptPages
-		loadingPreview.TranscriptPage = target.page
+		loadingPreview.TranscriptPages = pages
+		loadingPreview.TranscriptPage = page
+		if page > 0 {
+			m.previewPage = page
+		}
 	}
 	m.preview = loadingPreview
 	m.previewError = ""
@@ -723,6 +743,7 @@ func (m *Model) schedulePreview() tea.Cmd {
 
 func (m *Model) selectedPreviewTarget() (previewTarget, bool) {
 	page := max(1, m.previewPage)
+	pageSize := m.previewPageSize()
 	if m.focus == localPanel {
 		session, ok := m.selectedLocal()
 		if !ok {
@@ -731,9 +752,10 @@ func (m *Model) selectedPreviewTarget() (previewTarget, bool) {
 		return previewTarget{
 			key: "local:" + session.Path + ":" +
 				session.ModifiedAt.UTC().Format(time.RFC3339Nano) +
-				fmt.Sprintf(":page:%d", page),
-			page:  page,
-			local: &session,
+				fmt.Sprintf(":page:%d:size:%d", page, pageSize),
+			page:     page,
+			pageSize: pageSize,
+			local:    &session,
 		}, true
 	}
 
@@ -743,9 +765,10 @@ func (m *Model) selectedPreviewTarget() (previewTarget, bool) {
 	}
 	return previewTarget{
 		key: "shared:" + shared.BaseURL + ":" + shared.Locator() + ":" +
-			shared.Revision + fmt.Sprintf(":page:%d", page),
-		page:   page,
-		shared: &shared,
+			shared.Revision + fmt.Sprintf(":page:%d:size:%d", page, pageSize),
+		page:     page,
+		pageSize: pageSize,
+		shared:   &shared,
 	}, true
 }
 
@@ -767,18 +790,31 @@ func (m *Model) loadPreview(message previewDebounceMsg) tea.Cmd {
 				message.ctx,
 				*message.target.local,
 				message.target.page,
+				message.target.pageSize,
 			)
 		case message.target.shared != nil:
 			summary, err = m.loader.LoadSharedPreview(
 				message.ctx,
 				*message.target.shared,
 				message.target.page,
+				message.target.pageSize,
 			)
 		default:
 			err = fmt.Errorf("session preview target is unavailable")
 		}
 		return previewLoadedMsg{sequence: message.sequence, summary: summary, err: err}
 	}
+}
+
+func (m *Model) previewPageSize() int {
+	if !m.showTranscript {
+		return sessionpreview.DefaultPageSize
+	}
+	return m.transcriptPageSize()
+}
+
+func (m *Model) transcriptPageSize() int {
+	return sessionpreview.EffectivePageSize(max(1, m.height-3))
 }
 
 func (m *Model) clearPreview() {
